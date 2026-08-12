@@ -6,6 +6,14 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
+
+struct Vertex
+{
+	float x;
+	float y;
+	float z;
+};
+
 LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	switch (msg)
@@ -52,19 +60,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	ShowWindow(hWnd, nCmdShow);
 
 
-	// Win32 입력 흐름:
-	// 입력 장치 -> 드라이버 -> Windows 입력 시스템 -> 대상 HWND의 소유 스레드 메시지 큐
-	// -> PeekMessageW -> DispatchMessageW -> 해당 창의 WindowProc.
-	// HWND가 없는 스레드 메시지(WM_QUIT 등)는 메시지 루프에서 직접 처리한다.
-	// Windows API는 프로그램이 운영체제의 창, 입력, 메시지 기능을 사용하는 함수 인터페이스다.
+	// 흐름 : 디바이스에서 입력 받고 물리적인 신호 전달 -> 드라이버에서 운영체제 메세지로 번역 및 전달 -> 운영체제에서 포커스, 커서 위치, 마우스 캡처 등을 이용해 대상 HWND를 결정 -> 해당 창을 가지고 있는 스레드의 메세지 큐에 메세지 넣기
+	//			-> 스레드는 메세지 큐에서 하나씩 꺼내 hWnd를 판단 및 해당 창의 윈도우 프로시저 호출 (만약 hWnd가 null 이라면 스레드 메세지로 이는 따로 윈도우 프로시저를 호출 하지 않음)
 
-	// Direct3D 11 렌더링 흐름:
-	// Device는 GPU 리소스를 생성하고, DeviceContext는 파이프라인 상태와 렌더링 명령을 관리한다.
-	// SwapChain은 표시용 버퍼를 관리하며, Back Buffer는 실제 픽셀을 저장하는 Texture2D다.
-	// RTV는 Back Buffer를 Output Merger의 출력 대상으로 연결하는 View이고,
-	// Viewport는 셰이더 출력 좌표를 RenderTarget의 어느 픽셀 영역에 배치할지 정한다.
-	// Vertex Buffer -> Input Assembler/Input Layout -> Vertex Shader -> Rasterizer
-	// -> Pixel Shader -> Output Merger/RTV -> Back Buffer -> Present 순서로 화면이 완성된다.
+	// 질문 : 그러면 프로그램과 Windows Api는 무엇인가? 답: 소스 코드를 빌드하면 EXE 프로그램 파일이 생성 -> EXE를 실행하면 Windows가 프로세스와 메인 스레드를 생성
+	//									Windows API는 프로그램이 운영체제의 창과 메시지 기능을 사용하기 위한 함수 인터페이스
+	//									프로그래머는 WinodwAPI를 통해 커스텀하여 코드를 작성
 
 	DXGI_SWAP_CHAIN_DESC sd = {};
 	sd.BufferCount = 1;
@@ -93,16 +94,60 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	BackBuffer->Release();
 
-	float clearColor[4] =
-	{
-		0.1f, // Red
-		0.2f, // Green
-		0.3f, // Blue
-		1.0f  // Alpha
-	};
+	float clearColor[4] ={0.1f, 0.2f, 0.3f, 1.0f  };
+
+	Vertex verticies[] = {
+		{  1.0f, -1.0f, 0.0f },
+	{ -1.0f, -1.0f, 0.0f },
+	{  0.0f,  1.0f, 0.0f } };
+
+	ID3D11Buffer* VertexBuffer = nullptr;
+	D3D11_BUFFER_DESC VertexDesc = {};
+	D3D11_SUBRESOURCE_DATA VertexData = {};
+
+	VertexDesc.ByteWidth = sizeof(verticies);
+	VertexDesc.Usage = D3D11_USAGE_IMMUTABLE;
+	VertexDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+
+	VertexData.pSysMem = verticies;
+
+	result = Device->CreateBuffer(&VertexDesc, &VertexData, &VertexBuffer);
+
+	ID3DBlob* VSBlob = nullptr;
+	ID3DBlob* PSBlob = nullptr;
+	ID3DBlob* ErrBlob = nullptr;
+
+	ID3D11VertexShader* VS = nullptr;
+	ID3D11PixelShader* PS = nullptr;
+
+	result = D3DCompileFromFile(L"shader.hlsl", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VS_Main", "vs_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &VSBlob, &ErrBlob);
+	if (FAILED(result)) return 0;
+	result = D3DCompileFromFile(L"shader.hlsl", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PS_Main", "ps_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &PSBlob, &ErrBlob);
+	if (FAILED(result)) return 0;
+
+	result = Device->CreateVertexShader(VSBlob->GetBufferPointer(), VSBlob->GetBufferSize(), nullptr, &VS);
+	if (FAILED(result)) return 0;
+	result = Device->CreatePixelShader(PSBlob->GetBufferPointer(), PSBlob->GetBufferSize(), nullptr, &PS);
+	if (FAILED(result)) return 0;
+
+	ID3D11InputLayout* InputLayout = nullptr;
+	D3D11_INPUT_ELEMENT_DESC layout[] = { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 };
+	Device->CreateInputLayout(layout, 1, VSBlob->GetBufferPointer(), VSBlob->GetBufferSize(), &InputLayout);
 
 
+	VSBlob->Release();
+	PSBlob->Release();
 
+	D3D11_VIEWPORT ViewPort = {};
+
+	ViewPort.TopLeftX = 0.f;
+	ViewPort.TopLeftY = 0.f;
+	ViewPort.Height = 720.f;
+	ViewPort.Width = 1280.f;
+	ViewPort.MaxDepth = 1.0f;
+	ViewPort.MinDepth = 0.0f;
+	UINT Stride = sizeof(Vertex);
+	UINT Offset = 0;
 
 	LARGE_INTEGER ticks, currentTime, prevTime;
 
@@ -137,12 +182,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 			DeviceContext->OMSetRenderTargets(1, &RTV, NULL);
 			DeviceContext->ClearRenderTargetView(RTV, clearColor);
+
+			DeviceContext->RSSetViewports(1, &ViewPort);
+
+			DeviceContext->IASetInputLayout(InputLayout);
+			DeviceContext->IASetVertexBuffers(0, 1, &VertexBuffer, &Stride, &Offset);
+			DeviceContext->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+			DeviceContext->VSSetShader(VS, nullptr, 0);
+			DeviceContext->PSSetShader(PS, nullptr, 0);
+
+			DeviceContext->Draw(3, 0);
+
 			SwapChain->Present(1, 0);
 		}
 
 
 	}
-
+	VertexBuffer->Release();
 	RTV->Release();
 	DeviceContext->Release();
 	SwapChain->Release();
