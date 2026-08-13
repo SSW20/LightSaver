@@ -2,7 +2,9 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <DirectXMath.h>
 
+using namespace DirectX;
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
@@ -13,6 +15,20 @@ struct Vertex
 	float y;
 	float z;
 };
+
+struct alignas(16) CameraBufferData
+{
+	XMFLOAT4X4 View;
+	XMFLOAT4X4 Projection;
+};
+
+struct alignas(16) ObjectBufferData
+{
+	XMFLOAT4X4 World;
+};
+
+static_assert(sizeof(CameraBufferData) % 16 == 0);
+static_assert(sizeof(ObjectBufferData) % 16 == 0);
 
 LRESULT CALLBACK WindowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -82,6 +98,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	ID3D11DeviceContext* DeviceContext = nullptr;
 	ID3D11RenderTargetView* RTV = nullptr;
 
+
 	HRESULT result = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &sd, &SwapChain, &Device, NULL, &DeviceContext);
 	if (FAILED(result)) return 0;
 
@@ -94,24 +111,96 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	BackBuffer->Release();
 
+	ID3D11DepthStencilView* DSV = nullptr;
+	ID3D11Texture2D* DepthBuffer = nullptr;
+
+	D3D11_TEXTURE2D_DESC DepthDesc = {};
+	DepthDesc.Width = 1280;
+	DepthDesc.Height = 720;
+	DepthDesc.MipLevels = 1;
+	DepthDesc.ArraySize = 1;
+	DepthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+	DepthDesc.SampleDesc.Count = 1;
+	DepthDesc.SampleDesc.Quality = 0;
+	DepthDesc.Usage = D3D11_USAGE_DEFAULT;
+	DepthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+	DepthDesc.CPUAccessFlags = 0;
+	DepthDesc.MiscFlags = 0;
+
+	result = Device->CreateTexture2D(&DepthDesc, nullptr, &DepthBuffer);
+	if (FAILED(result)) return 0;
+
+	result = Device->CreateDepthStencilView(DepthBuffer,nullptr,&DSV);
+
+	if (FAILED(result)) return 0;
+
 	float clearColor[4] ={0.1f, 0.2f, 0.3f, 1.0f  };
 
-	Vertex verticies[] = {
-		{  1.0f, -1.0f, 0.0f },
-	{ -1.0f, -1.0f, 0.0f },
-	{  0.0f,  1.0f, 0.0f } };
+	Vertex vertices[] =
+	{
+		{ -0.5f, -0.5f, -0.5f }, // 0
+		{  0.5f, -0.5f, -0.5f }, // 1
+		{  0.5f, -0.5f,  0.5f }, // 2
+		{ -0.5f, -0.5f,  0.5f }, // 3
+
+		{ -0.5f,  0.5f, -0.5f }, // 4
+		{  0.5f,  0.5f, -0.5f }, // 5
+		{  0.5f,  0.5f,  0.5f }, // 6
+		{ -0.5f,  0.5f,  0.5f }  // 7
+	};
 
 	ID3D11Buffer* VertexBuffer = nullptr;
 	D3D11_BUFFER_DESC VertexDesc = {};
 	D3D11_SUBRESOURCE_DATA VertexData = {};
 
-	VertexDesc.ByteWidth = sizeof(verticies);
+	VertexDesc.ByteWidth = sizeof(vertices);
 	VertexDesc.Usage = D3D11_USAGE_IMMUTABLE;
 	VertexDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 
-	VertexData.pSysMem = verticies;
+	VertexData.pSysMem = vertices;
 
 	result = Device->CreateBuffer(&VertexDesc, &VertexData, &VertexBuffer);
+	if (FAILED(result)) return 0;
+
+	UINT indices[] =
+	{
+		// 앞면
+		0, 4, 5,
+		0, 5, 1,
+
+		// 뒷면
+		3, 2, 6,
+		3, 6, 7,
+
+		// 왼쪽
+		0, 3, 7,
+		0, 7, 4,
+
+		// 오른쪽
+		1, 5, 6,
+		1, 6, 2,
+
+		// 아래
+		0, 1, 2,
+		0, 2, 3,
+
+		// 위
+		4, 7, 6,
+		4, 6, 5
+	};
+
+	ID3D11Buffer* IndexBuffer = nullptr;
+	D3D11_BUFFER_DESC IndexDesc = {};
+	IndexDesc.ByteWidth = sizeof(indices);
+	IndexDesc.Usage = D3D11_USAGE_DEFAULT;
+	IndexDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+
+	D3D11_SUBRESOURCE_DATA IndexData = {};
+	IndexData.pSysMem = indices;
+
+	result = Device->CreateBuffer(&IndexDesc, &IndexData, &IndexBuffer);
+	if (FAILED(result)) return 0;
+
 
 	ID3DBlob* VSBlob = nullptr;
 	ID3DBlob* PSBlob = nullptr;
@@ -149,6 +238,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	UINT Stride = sizeof(Vertex);
 	UINT Offset = 0;
 
+
+	ID3D11Buffer* CameraBuffer = nullptr;
+	ID3D11Buffer* ObjectBuffer = nullptr;
+
+	D3D11_BUFFER_DESC CameraDesc = {};
+	CameraDesc.ByteWidth = sizeof(CameraBufferData);
+	CameraDesc.Usage = D3D11_USAGE_DYNAMIC;
+	CameraDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	CameraDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+	result = Device->CreateBuffer(&CameraDesc, nullptr, &CameraBuffer);
+	if (FAILED(result)) return 0;
+
+	D3D11_BUFFER_DESC ObjectDesc = {};
+	ObjectDesc.ByteWidth = sizeof(ObjectBufferData);
+	ObjectDesc.Usage = D3D11_USAGE_DYNAMIC;
+	ObjectDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	ObjectDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+	result = Device->CreateBuffer(&ObjectDesc, nullptr, &ObjectBuffer);
+	if (FAILED(result)) return 0;
+
+
+
+
 	LARGE_INTEGER ticks, currentTime, prevTime;
 
 	// 1초에 틱 수
@@ -159,6 +273,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 	bool bRunning = true;
 	MSG msg = { };
+
+	XMVECTOR cameraPosition = XMVectorSet(0.0f, 0.0f, -3.0f, 1.0f);
+	XMVECTOR cameraTarget = XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+	XMVECTOR cameraUp = XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+
+	XMMATRIX View = XMMatrixLookAtLH(cameraPosition, cameraTarget, cameraUp);
+	XMMATRIX Projection = XMMatrixPerspectiveFovLH(XM_PIDIV4, 1280.f / 720.f, 0.1f, 100.f);
+
+	float Rotation = 0.0f;
+
 	while (bRunning && msg.message != WM_QUIT)
 	{
 		if (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
@@ -175,31 +299,75 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		{
 			// deltaTime 구하기
 			QueryPerformanceCounter(&currentTime);
-			float deltaTime = (double)(currentTime.QuadPart - prevTime.QuadPart) / (double)ticks.QuadPart;
+			float deltaTime = static_cast<float>(
+				static_cast<double>(currentTime.QuadPart - prevTime.QuadPart) /
+				static_cast<double>(ticks.QuadPart));
 			prevTime = currentTime;
 			// UPDATE
+			Rotation += deltaTime;
+			XMMATRIX World = DirectX::XMMatrixRotationY(Rotation);
+
+			D3D11_MAPPED_SUBRESOURCE MappedResource = {};
+			result = DeviceContext->Map(CameraBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
+
+			if (FAILED(result))
+			{
+				bRunning = false;
+				break;
+			}
+
+			CameraBufferData* CameraData = static_cast<CameraBufferData*>(MappedResource.pData);
+			DirectX::XMStoreFloat4x4(&CameraData->View, DirectX::XMMatrixTranspose(View));
+			DirectX::XMStoreFloat4x4(&CameraData->Projection, DirectX::XMMatrixTranspose(Projection));
+			DeviceContext->Unmap(CameraBuffer, 0);
+
+			result = DeviceContext->Map(ObjectBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
+
+			if (FAILED(result))
+			{
+				bRunning = false;
+				break;
+			}
+
+			ObjectBufferData* ObjectData = static_cast<ObjectBufferData*>(MappedResource.pData);
+			DirectX::XMStoreFloat4x4(&ObjectData->World, DirectX::XMMatrixTranspose(World));
+			DeviceContext->Unmap(ObjectBuffer, 0);
+
 			// RENDER
 
-			DeviceContext->OMSetRenderTargets(1, &RTV, NULL);
+			DeviceContext->OMSetRenderTargets(1, &RTV, DSV);
 			DeviceContext->ClearRenderTargetView(RTV, clearColor);
+			DeviceContext->ClearDepthStencilView(DSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
 
 			DeviceContext->RSSetViewports(1, &ViewPort);
 
+
 			DeviceContext->IASetInputLayout(InputLayout);
 			DeviceContext->IASetVertexBuffers(0, 1, &VertexBuffer, &Stride, &Offset);
-			DeviceContext->IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+			ID3D11Buffer* ConstantBuffers[] = { CameraBuffer,ObjectBuffer };
+			DeviceContext->VSSetConstantBuffers(0, 2, ConstantBuffers);
+			DeviceContext->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R32_UINT, 0);
+			DeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 			DeviceContext->VSSetShader(VS, nullptr, 0);
 			DeviceContext->PSSetShader(PS, nullptr, 0);
 
-			DeviceContext->Draw(3, 0);
+			DeviceContext->DrawIndexed(36, 0, 0);
 
 			SwapChain->Present(1, 0);
 		}
 
 
 	}
+	ObjectBuffer->Release();
+	CameraBuffer->Release();
+	IndexBuffer->Release();
 	VertexBuffer->Release();
+	InputLayout->Release();
+	PS->Release();
+	VS->Release();
+	DSV->Release();
+	DepthBuffer->Release();
 	RTV->Release();
 	DeviceContext->Release();
 	SwapChain->Release();
