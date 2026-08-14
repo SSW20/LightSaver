@@ -2457,7 +2457,7 @@ Camera View/Projection           → CameraComponent와 Renderer
 → 임시 Shader Blob 해제
 → Viewport 설정
 → Camera/Object Constant Buffer 생성
-→ 고정 카메라 View/Projection 최초 업로드
+→ 움직이는 카메라가 사용할 GPU 공간 준비
 ```
 
 정점과 인덱스 배열, 각종 `D3D11_*_DESC`, `HRESULT`, Shader Blob은 초기화 함수 안에서만 필요하므로 지역변수다. 반대로 생성된 GPU 리소스는 이후 프레임에서도 사용하므로 `LightSaverGame`의 멤버다.
@@ -2472,7 +2472,7 @@ Camera View/Projection           → CameraComponent와 Renderer
 
 ---
 
-### 8. 고정 CameraBuffer를 초기화에서 한 번 기록하는 이유
+### 8. 움직이는 CameraBuffer를 Render에서 매 프레임 기록하는 이유
 
 다음 호출은 GPU 버퍼 공간을 만들지만 초기 데이터는 전달하지 않는다.
 
@@ -2480,7 +2480,7 @@ Camera View/Projection           → CameraComponent와 Renderer
 CreateBuffer(&CameraDesc, nullptr, &CameraBuffer);
 ```
 
-두 번째 인수가 `nullptr`이므로 View와 Projection은 아직 들어 있지 않다. 따라서 생성 직후 다음 순서로 최초 데이터를 기록한다.
+두 번째 인수가 `nullptr`이므로 View와 Projection은 아직 들어 있지 않다. 고정 카메라 단계에서는 생성 직후 한 번 기록해도 충분했지만, 현재는 WASD와 마우스로 카메라가 움직이므로 `Render()`에서 매 프레임 다음 순서로 기록한다.
 
 ```text
 Map(CameraBuffer, WRITE_DISCARD)
@@ -2489,28 +2489,33 @@ Map(CameraBuffer, WRITE_DISCARD)
 → Unmap(CameraBuffer)
 ```
 
-기존 `main.cpp`에서는 카메라가 움직이지 않는데도 같은 View/Projection을 매 프레임 다시 기록했다. 현재 큐브 단계의 카메라는 고정되어 있으므로 초기화에서 한 번만 기록한다.
-
-나중에 WASD와 마우스 카메라를 구현하면 View 행렬이 매 프레임 변한다. 그 단계에서는 CameraComponent가 상태를 계산하고 Renderer가 변경된 값을 CameraBuffer에 다시 업로드한다.
+현재 Projection은 고정되어 있지만 View가 매 프레임 바뀐다. 두 행렬이 같은 `CameraBuffer`에 들어 있으므로 함께 기록한다. 나중에 Renderer를 분리하면 Camera는 CPU 상태와 행렬 계산을 담당하고 Renderer가 계산 결과를 GPU 버퍼에 업로드한다.
 
 ---
 
 ### 9. Update와 Render의 책임 분리
 
-현재 `Update`는 CPU 게임 상태만 바꾼다.
+현재 `Update`는 CPU 게임 상태와 카메라 상태를 바꾼다.
 
 ```cpp
 Rotation += deltaTime;
+키보드 입력으로 Camera::Position 변경;
+마우스 이동량으로 Camera::Yaw/Pitch 변경;
 ```
 
 `Render`는 회전 상태로 World 행렬을 계산하고 GPU ObjectBuffer를 갱신한 뒤 실제 그리기 명령을 실행한다.
 
 ```text
 Update
-└─ Rotation 변경
+├─ Rotation 변경
+├─ WASD 입력 결합과 대각선 속도 보정
+├─ Camera Position 변경
+└─ 마우스 이동량으로 Yaw/Pitch 변경
 
 Render
 ├─ XMMatrixRotationY로 World 계산
+├─ Camera가 View/Projection 계산
+├─ CameraBuffer Map/Unmap
 ├─ ObjectBuffer Map/Unmap
 ├─ RenderTarget/DepthStencil 설정 및 Clear
 ├─ Viewport 설정
@@ -2519,7 +2524,7 @@ Render
 └─ DrawIndexed(36, 0, 0)
 ```
 
-ObjectBuffer 갱신을 `Render`에 둔 이유는 `Map/Unmap`이 GPU에 전달할 렌더링 데이터를 준비하는 작업이기 때문이다. 또한 `Render`는 `bool`을 반환하므로 `Map` 실패를 `GameLoop`에 전달할 수 있다. `void Update`에서 단순히 `return`하면 렌더링이 계속되어 이전 프레임의 데이터로 그려질 수 있다.
+CameraBuffer와 ObjectBuffer 갱신을 `Render`에 둔 이유는 `Map/Unmap`이 GPU에 전달할 렌더링 데이터를 준비하는 작업이기 때문이다. 또한 `Render`는 `bool`을 반환하므로 `Map` 실패를 `GameLoop`에 전달할 수 있다. `void Update`에서 단순히 `return`하면 렌더링이 계속되어 이전 프레임의 데이터로 그려질 수 있다.
 
 ---
 
@@ -2602,4 +2607,798 @@ Present는 공통 GameLoop에서 한 번만 호출한다.
 COM 리소스는 소유한 객체가 해제한다.
 ```
 
-다음 구조 단계에서는 `Mesh`를 만들어 Vertex/Index Buffer의 소유권과 생성 코드를 `LightSaverGame`에서 분리한다. 이후 Shader, Renderer, World, Actor, Component 순으로 확장한다.
+다음 구조 단계에서는 먼저 `Shader`를 만들어 VS/PS/Input Layout과 컴파일 코드를 분리하고, 이어서 `Mesh`에 Vertex/Index Buffer의 소유권과 생성 코드를 옮긴다. 이후 Material, MeshComponent, Renderer, World, Actor 순으로 확장한다.
+
+---
+
+## 2026-08-14 — FPS 카메라 수학, WASD 이동과 마우스 회전
+
+### 1. 이번 단계의 목표와 결과
+
+이전에는 카메라 위치와 바라보는 지점을 초기화 코드에 직접 적었다.
+
+```cpp
+XMMatrixLookAtLH(cameraPosition, cameraTarget, cameraUp);
+```
+
+이 방식은 고정된 큐브를 확인하기에는 충분하지만 플레이어가 움직이는 FPS 카메라에는 부족하다. 이번 단계에서는 카메라의 상태를 `Camera` 클래스로 분리하고 다음 흐름을 구현했다.
+
+```text
+WASD 키 상태
+→ 앞/오른쪽 입력 축 계산
+→ 대각선 속도 보정
+→ Camera Position 변경
+
+마우스의 화면상 이동량
+→ 픽셀당 라디안 감도 적용
+→ Camera Yaw/Pitch 변경
+
+Position + Yaw + Pitch
+→ Forward/Right/Up 계산
+→ View 행렬 계산
+→ CameraBuffer에 View/Projection 업로드
+→ 움직인 카메라 기준으로 큐브 렌더링
+```
+
+현재 `Camera`가 직접 저장하는 값은 다음과 같다.
+
+```cpp
+XMFLOAT3 Position;
+float Yaw;
+float Pitch;
+float FovY;
+float AspectRatio;
+float NearZ;
+float FarZ;
+```
+
+`Forward`, `Right`, `Up`, `View`, `Projection`은 따로 저장하지 않고 위 상태에서 계산한다. 계산 가능한 결과를 여러 곳에 중복 저장하면 한쪽만 갱신되어 서로 불일치할 수 있기 때문이다.
+
+---
+
+### 2. 현재 좌표계와 기준 방향
+
+현재 코드는 이름이 `LH`로 끝나는 DirectXMath 함수를 사용한다.
+
+```text
++X = 오른쪽
++Y = 위쪽
++Z = 앞쪽
+```
+
+카메라가 회전하지 않은 초기 상태의 기준 Forward는 다음과 같다.
+
+```text
+BaseForward = (0, 0, 1)
+```
+
+`Yaw = 0`, `Pitch = 0`을 Forward 공식에 넣어도 반드시 `(0, 0, 1)`이 나와야 한다. 이것은 공식을 검사하는 가장 쉬운 기준이다.
+
+`WorldUp`은 월드 전체에서 변하지 않는 위쪽 축이다.
+
+```text
+WorldUp = (0, 1, 0)
+```
+
+카메라가 위를 보더라도 `WorldUp`이 기울어지는 것은 아니다. 카메라가 회전한 뒤의 위쪽은 `CameraUp`이며, 월드의 고정된 위쪽인 `WorldUp`과 서로 다른 개념이다.
+
+---
+
+### 3. 도와 라디안
+
+사람은 보통 45도, 90도처럼 도 단위를 사용하지만 C++의 삼각함수와 DirectXMath 회전 함수는 라디안을 사용한다.
+
+```text
+180 degree = π radian
+90 degree  = π/2 radian
+45 degree  = π/4 radian
+```
+
+변환식은 다음과 같다.
+
+```text
+radian = degree × π / 180
+degree = radian × 180 / π
+```
+
+DirectXMath에서는 직접 π를 곱하지 않고 다음 함수를 사용할 수 있다.
+
+```cpp
+XMConvertToRadians(89.0f);
+XMConvertToDegrees(angleInRadians);
+```
+
+`std::sin`, `std::cos`, `XMMatrixRotationY`, `XMMatrixPerspectiveFovLH`에 전달하는 각도도 라디안이다. 변수 타입이 모두 `float`이므로 도를 잘못 전달해도 컴파일 오류는 발생하지 않는다. 단위는 타입이 아니라 프로그래머가 지켜야 하는 계약이다.
+
+---
+
+### 4. Yaw와 Pitch가 의미하는 회전
+
+FPS 카메라는 현재 Roll을 사용하지 않고 두 각도만 사용한다.
+
+```text
+Yaw   = 월드 Y축을 중심으로 좌우 회전
+Pitch = 카메라가 위아래를 바라보는 회전
+```
+
+현재 기준에서 `Yaw = 0`이면 +Z를 보고, 양의 Yaw가 증가하면 +X 쪽으로 회전한다.
+
+먼저 위아래를 보지 않는 수평면만 생각하면 단위원에서 다음 관계가 나온다.
+
+```text
+x = sin(Yaw)
+z = cos(Yaw)
+```
+
+검산하면 다음과 같다.
+
+```text
+Yaw = 0°  → (x, z) = (0, 1)  → +Z
+Yaw = 90° → (x, z) = (1, 0)  → +X
+```
+
+Pitch가 추가되면 수평 성분 전체의 크기가 `cos(Pitch)`로 줄고, 그만큼 수직 성분 `sin(Pitch)`가 생긴다.
+
+```text
+수평 길이 = cos(Pitch)
+y         = sin(Pitch)
+```
+
+수평 길이를 Yaw에 따라 X와 Z로 나누면 최종 Forward 공식이 된다.
+
+```text
+x = cos(Pitch) × sin(Yaw)
+y = sin(Pitch)
+z = cos(Pitch) × cos(Yaw)
+```
+
+코드는 다음과 같다.
+
+```cpp
+XMVECTOR forward = XMVectorSet(
+    std::cos(Pitch) * std::sin(Yaw),
+    std::sin(Pitch),
+    std::cos(Pitch) * std::cos(Yaw),
+    0.0f);
+
+return XMVector3Normalize(forward);
+```
+
+Pitch가 커질수록 Y가 증가하고 XZ 평면에 남는 길이가 줄어든다. 이것은 전체 길이를 일정하게 유지하면서 방향만 위쪽으로 기울이는 과정이다.
+
+---
+
+### 5. XMFLOAT3와 XMVECTOR의 역할 차이
+
+`XMFLOAT3`와 `XMVECTOR`는 모두 숫자 여러 개를 담지만 목적이 다르다.
+
+```text
+XMFLOAT3
+└─ 메모리에 오래 저장하기 좋은 x, y, z 구조체
+
+XMVECTOR
+└─ CPU SIMD 레지스터에서 계산하기 좋은 4개 성분 벡터
+```
+
+따라서 Camera Position은 `XMFLOAT3`로 저장하고 계산할 때 `XMVECTOR`로 불러온다.
+
+```cpp
+XMVECTOR position = XMLoadFloat3(&Position);
+// 벡터 계산
+XMStoreFloat3(&Position, position);
+```
+
+`XMVECTOR`는 네 성분을 가지지만 `XMVector3...` 함수는 이름처럼 주로 XYZ를 3차원 벡터로 해석한다. 방향 벡터의 W는 0으로 둔다.
+
+```text
+위치: (x, y, z, 1)
+방향: (x, y, z, 0)
+```
+
+동차좌표 변환에서 위치는 이동 행렬의 영향을 받아야 하지만 방향은 받아서는 안 되기 때문이다. 현재 `XMVector3Normalize`는 길이를 계산할 때 XYZ를 사용한다. Forward의 W가 0이면 정규화 후에도 0으로 유지되어 방향이라는 의미가 보존된다.
+
+---
+
+### 6. 정규화가 필요한 이유
+
+정규화는 벡터의 방향은 유지하고 길이를 1로 만드는 연산이다.
+
+```text
+normalize(v) = v / |v|
+```
+
+예를 들어 `(3, 0, 4)`의 길이는 5다.
+
+```text
+normalize(3, 0, 4)
+= (3/5, 0, 4/5)
+= (0.6, 0, 0.8)
+```
+
+방향 벡터의 길이가 1이어야 다음 계산이 직관적으로 유지된다.
+
+```text
+이동량 = 단위 방향 × 실제 이동 거리
+```
+
+DirectXMath에서는 다음 함수를 사용한다.
+
+```cpp
+XMVector3Normalize(vector);
+```
+
+이 함수는 원본 변수를 직접 고치지 않고 계산 결과를 반환한다. 따라서 반드시 반환값을 받아야 한다.
+
+```cpp
+forward = XMVector3Normalize(forward); // 올바름
+XMVector3Normalize(forward);           // 결과를 버리므로 forward는 그대로
+```
+
+---
+
+### 7. 외적으로 Right와 CameraUp 만들기
+
+외적은 두 벡터가 만드는 평면에 수직인 벡터를 구한다. 결과 방향은 입력 순서에 따라 달라진다.
+
+```text
+A × B = -(B × A)
+```
+
+기본 축의 순환은 다음과 같이 기억할 수 있다.
+
+```text
+X × Y = Z
+Y × Z = X
+Z × X = Y
+```
+
+순서를 뒤집으면 음수가 된다.
+
+```text
+Y × X = -Z
+Z × Y = -X
+X × Z = -Y
+```
+
+현재 카메라의 Right는 다음 순서로 계산한다.
+
+```cpp
+Right = normalize(WorldUp × Forward);
+```
+
+카메라가 초기 Forward인 +Z를 볼 때 계산해 보면:
+
+```text
+WorldUp × Forward
+= Y × Z
+= X
+= 오른쪽
+```
+
+일반적인 Forward를 `(Fx, Fy, Fz)`라고 하면 결과는 다음과 같다.
+
+```text
+(0, 1, 0) × (Fx, Fy, Fz)
+= (Fz, 0, -Fx)
+```
+
+결과의 Y는 항상 0이다. 따라서 카메라가 위아래를 보더라도 Right는 지면과 평행하다. 여기서 WorldUp과 Forward가 서로 수직일 필요는 없다. 외적이 두 벡터 모두에 수직인 새로운 방향을 계산한다.
+
+CameraUp은 Forward와 Right 양쪽에 수직이어야 한다.
+
+```cpp
+CameraUp = normalize(Forward × Right);
+```
+
+초기 방향으로 검산하면:
+
+```text
+Forward × Right
+= Z × X
+= Y
+= 위쪽
+```
+
+최종적으로 카메라는 서로 직교하는 세 기준축을 얻는다.
+
+```text
+Right     = WorldUp × Forward
+CameraUp  = Forward × Right
+Forward   = Yaw/Pitch에서 계산
+```
+
+---
+
+### 8. WorldUp과 CameraUp이 다른 이유
+
+카메라가 위쪽을 보면 Forward에는 Y 성분이 생긴다.
+
+```text
+Forward ≈ (0, 0.707, 0.707)
+```
+
+그러나 월드의 위쪽은 계속 다음과 같다.
+
+```text
+WorldUp = (0, 1, 0)
+```
+
+WorldUp은 중력 방향과 지면의 기준을 정하는 월드 좌표축이다. 카메라가 어디를 본다고 월드 전체가 기울지는 않는다. 반면 CameraUp은 회전된 카메라 화면에서 위쪽이 어디인지 나타낸다. `XMMatrixLookToLH`에는 실제 카메라 자세를 만들기 위해 CameraUp을 전달한다.
+
+이 방식은 FPS 카메라의 Roll을 0으로 유지한다. 비행기처럼 카메라를 옆으로 기울이는 Roll까지 구현한다면 WorldUp만으로 Right를 계속 재구성하는 방식보다 Quaternion 또는 카메라 자체 회전축을 관리하는 방식이 필요하다.
+
+---
+
+### 9. View 행렬: XMMatrixLookToLH
+
+View 행렬은 카메라를 월드에 배치하는 행렬이 아니라, 월드 전체를 카메라 기준 좌표로 바꾸는 행렬이다.
+
+```cpp
+XMMatrixLookToLH(
+    CameraPos,
+    GetForwardVector(),
+    GetUpVector());
+```
+
+각 인수의 의미는 다음과 같다.
+
+```text
+EyePosition  = 카메라의 월드 위치
+EyeDirection = 카메라가 바라보는 방향
+UpDirection  = 카메라 화면의 위쪽 방향
+```
+
+`LookAt`과 `LookTo`의 차이는 두 번째 인수다.
+
+```text
+XMMatrixLookAtLH(Position, TargetPosition, Up)
+→ 월드의 어느 지점을 볼 것인지 전달
+
+XMMatrixLookToLH(Position, ForwardDirection, Up)
+→ 어느 방향을 볼 것인지 전달
+```
+
+현재 Camera는 Target을 저장하지 않고 Yaw/Pitch로 Forward를 계산하므로 `LookToLH`가 더 자연스럽다.
+
+---
+
+### 10. Projection 행렬과 카메라 렌즈 값
+
+원근 투영은 다음 함수로 만든다.
+
+```cpp
+XMMatrixPerspectiveFovLH(FovY, AspectRatio, NearZ, FarZ);
+```
+
+각 값은 다음 의미를 가진다.
+
+```text
+FovY        = 세로 시야각, 라디안 단위
+AspectRatio = 화면 너비 / 화면 높이
+NearZ       = 카메라에서 가장 가까이 보이는 거리
+FarZ        = 카메라에서 가장 멀리 보이는 거리
+```
+
+현재 값은 다음과 같다.
+
+```cpp
+FovY = XM_PIDIV4;          // 45도
+AspectRatio = 1280 / 720; // 약 1.777, 16:9
+NearZ = 0.1f;
+FarZ = 100.0f;
+```
+
+AspectRatio가 맞지 않으면 화면이 가로 또는 세로로 찌그러진다. NearZ보다 가까운 물체와 FarZ보다 먼 물체는 클리핑된다. NearZ를 지나치게 0에 가깝게 두면 제한된 Depth Buffer 정밀도를 비효율적으로 사용해 Z-fighting이 심해질 수 있다.
+
+---
+
+### 11. 지면 이동에서 Forward의 Y를 제거하는 이유
+
+카메라가 위를 볼 때 Forward에는 양의 Y가 들어간다. 이 Forward로 그대로 움직이면 W를 눌렀을 때 카메라가 공중으로 올라간다. 걷는 FPS 카메라는 시선과 이동을 분리해야 한다.
+
+```cpp
+XMVECTOR forward = GetForwardVector();
+forward = XMVectorSetY(forward, 0.0f);
+forward = XMVector3Normalize(forward);
+```
+
+Y를 0으로 만든 뒤 다시 정규화하는 이유가 중요하다. 예를 들어 45도 위를 볼 때 Forward는 대략 다음과 같다.
+
+```text
+(0, 0.707, 0.707)
+```
+
+Y만 제거하면:
+
+```text
+(0, 0, 0.707)
+```
+
+방향은 맞지만 길이가 0.707이므로 같은 이동 거리를 곱해도 느리게 움직인다. 다시 정규화하면 `(0, 0, 1)`이 되어 시선의 Pitch와 관계없이 지면 이동 속도가 일정해진다.
+
+Right는 `WorldUp × Forward`로 만들 때 수식상 Y가 0이므로 현재 구조에서는 별도로 Y를 제거할 필요가 없다.
+
+---
+
+### 12. 위치 이동에 사용한 DirectXMath 함수
+
+저장된 Position을 계산용 벡터로 불러온다.
+
+```cpp
+XMVECTOR newPos = XMLoadFloat3(&Position);
+```
+
+단위 방향에 실제 이동 거리를 곱한다.
+
+```cpp
+XMVECTOR move = XMVectorScale(direction, distance);
+```
+
+현재 위치와 이동량을 더한다.
+
+```cpp
+newPos = XMVectorAdd(newPos, move);
+```
+
+계산 결과를 저장용 구조체에 다시 기록한다.
+
+```cpp
+XMStoreFloat3(&Position, newPos);
+```
+
+전체 의미는 일반 벡터식과 같다.
+
+```text
+NewPosition = OldPosition + Direction × Distance
+```
+
+---
+
+### 13. deltaTime과 프레임 독립적인 이동
+
+키를 누르고 있는 동안 프레임마다 이동하므로 프레임 수가 많을수록 더 빨라지는 문제가 생길 수 있다.
+
+```text
+60 FPS에서 프레임당 1 이동  → 1초에 60 이동
+144 FPS에서 프레임당 1 이동 → 1초에 144 이동
+```
+
+따라서 초당 속도에 이번 프레임이 차지한 시간을 곱한다.
+
+```cpp
+float MoveDistance = CameraSpeed * deltaTime;
+```
+
+단위로 확인하면 다음과 같다.
+
+```text
+CameraSpeed: 3 world-unit / second
+deltaTime:   second / frame
+
+3 world-unit/second × second/frame
+= 3 × deltaTime world-unit/frame
+```
+
+그 결과 FPS가 달라도 같은 실제 시간 동안 이동한 총거리가 거의 같아진다.
+
+---
+
+### 14. WASD 입력과 0x8000
+
+현재 키 상태는 Win32 함수로 확인한다.
+
+```cpp
+GetAsyncKeyState('W') & 0x8000
+```
+
+`GetAsyncKeyState`는 `SHORT` 비트값을 반환한다. 최상위 비트가 1이면 호출 시점에 키가 눌려 있다. `0x8000`은 16비트 값에서 그 최상위 비트만 켠 마스크다.
+
+```text
+0x8000 = 1000 0000 0000 0000₂
+```
+
+비트 AND 결과가 0이 아니면 현재 눌림 상태다.
+
+입력은 즉시 이동시키지 않고 먼저 두 축에 모은다.
+
+```text
+ForwardInput: W = +1, S = -1
+RightInput:   D = +1, A = -1
+```
+
+따라서 W와 S를 동시에 누르면 0, A와 D를 동시에 눌러도 0이 된다.
+
+---
+
+### 15. 대각선 이동이 빨라지는 이유와 해결
+
+W만 누르면 입력 벡터 길이는 1이다.
+
+```text
+(Forward, Right) = (1, 0)
+length = √(1² + 0²) = 1
+```
+
+W와 D를 동시에 누르면 두 축에 각각 1이 들어간다.
+
+```text
+(Forward, Right) = (1, 1)
+length = √(1² + 1²) = √2 ≈ 1.414
+```
+
+보정하지 않으면 대각선 이동이 직선 이동보다 약 41.4% 빠르다. 현재 코드는 입력 길이가 1보다 클 때 두 축을 그 길이로 나눈다.
+
+```cpp
+float inputLength = std::sqrt(
+    ForwardInput * ForwardInput +
+    RightInput * RightInput);
+
+if (inputLength > 1.0f)
+{
+    ForwardInput /= inputLength;
+    RightInput /= inputLength;
+}
+```
+
+W+D는 다음 값이 된다.
+
+```text
+(1/√2, 1/√2)
+≈ (0.707, 0.707)
+```
+
+새 길이는 정확히 1이므로 모든 방향에서 최대 이동 속도가 같아진다. 키 입력을 각각 곧바로 `AddForward`와 `AddRight`에 적용하지 않고 먼저 합치는 이유가 이것이다.
+
+---
+
+### 16. 마우스 좌표계: Client와 Screen
+
+마우스 이동량을 얻기 위해 현재는 커서를 게임 클라이언트 영역 중앙으로 되돌리는 임시 방식을 사용한다. 먼저 실제 게임 화면 영역의 크기를 얻는다.
+
+```cpp
+RECT clientRect;
+GetClientRect(hWnd, &clientRect);
+```
+
+Client 영역은 제목 표시줄과 테두리를 제외하고 Direct3D 화면이 그려지는 부분이다. 좌상단이 `(0, 0)`이며 `right`, `bottom`으로 크기를 구할 수 있다.
+
+```cpp
+POINT center;
+center.x = (clientRect.left + clientRect.right) / 2;
+center.y = (clientRect.top + clientRect.bottom) / 2;
+```
+
+이 중앙점은 아직 창 내부 기준 Client 좌표다. 그러나 `GetCursorPos`와 `SetCursorPos`는 데스크톱 전체 기준 Screen 좌표를 사용한다. 서로 다른 좌표를 빼면 틀린 이동량이 나오므로 변환한다.
+
+```cpp
+ClientToScreen(hWnd, &center);
+```
+
+운영체제는 `hWnd`로 창의 화면 위치, 제목 표시줄과 테두리 등을 알고 있으므로 Client 좌표를 Screen 좌표로 바꿀 수 있다.
+
+```text
+GetClientRect
+→ 게임 화면 내부의 중앙 계산
+
+ClientToScreen
+→ 그 중앙을 데스크톱 전체 좌표로 변환
+
+GetCursorPos
+→ 현재 커서의 데스크톱 전체 좌표 획득
+
+CursorPosition - Center
+→ 이번 마우스 상대 이동량 계산
+```
+
+---
+
+### 17. 픽셀 이동량이 라디안 회전량이 되는 과정
+
+`DeltaX`, `DeltaY`의 단위는 픽셀이다. `MouseSpeed`는 이름상 속도지만 실제 의미는 픽셀당 회전 감도다.
+
+```cpp
+float MouseSpeed = XMConvertToRadians(0.1f);
+```
+
+단위는 다음과 같다.
+
+```text
+DeltaX:    pixel
+MouseSpeed: radian / pixel
+
+pixel × radian/pixel = radian
+```
+
+예를 들어 마우스가 10픽셀 움직이고 감도가 픽셀당 0.1도라면 총 1도 회전한다. 코드에서는 0.1도를 먼저 라디안으로 바꾸었으므로 `AddRotation`에는 라디안 변화량이 전달된다.
+
+```cpp
+MainCamera.AddRotation(
+    DeltaX * MouseSpeed,
+    -DeltaY * MouseSpeed);
+```
+
+Windows 화면 좌표는 아래로 갈수록 Y가 커진다. 현재 Camera는 Pitch가 증가할수록 위를 보므로 `DeltaY`에 음수를 붙여 좌표 방향을 뒤집는다.
+
+마우스 이동량에는 `deltaTime`을 다시 곱하지 않는다. `DeltaX`, `DeltaY`가 이미 지난 프레임 사이에 발생한 이동량이기 때문이다. 키보드는 눌림 상태이므로 시간에 따라 이동량을 만들어야 하지만 마우스 델타는 이미 구간 이동량이다.
+
+---
+
+### 18. Pitch를 ±89도로 제한하는 이유
+
+마우스를 계속 위로 움직이면 Pitch가 90도를 넘어 카메라가 뒤집힐 수 있다. 또한 정확히 위나 아래를 바라보면 Forward와 WorldUp이 나란해져 외적 결과의 길이가 0에 가까워진다.
+
+```text
+Forward ∥ WorldUp
+→ WorldUp × Forward = Zero Vector
+→ Right를 정상적으로 정규화할 수 없음
+```
+
+따라서 90도에 도달하기 직전인 ±89도로 제한한다.
+
+```cpp
+Pitch = std::clamp(
+    Pitch,
+    XMConvertToRadians(-89.0f),
+    XMConvertToRadians(89.0f));
+```
+
+`std::clamp(value, low, high)`는 값이 범위보다 작으면 `low`, 크면 `high`, 범위 안이면 원래 값을 반환한다. `std::clamp`는 C++17부터 지원되므로 프로젝트의 C++ 언어 표준을 `/std:c++17`로 설정했다.
+
+---
+
+### 19. 현재 커서 중앙 복귀 방식의 한계
+
+현재 구현은 매 프레임 다음 함수를 호출한다.
+
+```cpp
+SetCursorPos(center.x, center.y);
+```
+
+이 방식은 간단하지만 운영체제 커서를 실제로 옮기므로 다음 한계가 있다.
+
+```text
+커서가 보이면 중앙에서 떨리는 것처럼 보일 수 있음
+게임 창이 비활성화되어도 Update가 돌면 커서를 다시 끌어올 수 있음
+첫 프레임의 커서 위치가 중앙에서 멀면 카메라가 갑자기 크게 회전할 수 있음
+Windows 커서 처리와 가속 설정에 영향을 받을 수 있음
+```
+
+현재는 `ShowCursor(FALSE)`로 운영체제 커서를 숨긴다. 단, 화면 중앙에 보이는 FPS 조준점은 운영체제 커서가 아니다. 나중에 Direct3D UI로 별도 렌더링해야 한다.
+
+최종 InputSystem에서는 `WM_INPUT` Raw Input을 사용한다.
+
+```text
+현재 임시 방식
+GetCursorPos → 중앙과 차이 계산 → SetCursorPos
+
+최종 방식
+WM_INPUT → 상대 DeltaX/DeltaY 직접 획득
+```
+
+Raw Input으로 바꾸기 전에는 `GetForegroundWindow() == hWnd`로 활성 창인지 확인하고, 처음 활성화된 프레임에는 회전 없이 커서만 중앙으로 옮기는 `MouseInitialized` 상태가 필요하다. 이 처리는 InputSystem 단계에서 추가한다.
+
+---
+
+### 20. CameraBuffer를 매 프레임 갱신하는 흐름
+
+카메라의 Position, Yaw, Pitch는 Update에서 변하지만 GPU는 C++ 객체를 직접 읽을 수 없다. Render에서 계산된 View와 Projection을 Constant Buffer로 복사해야 한다.
+
+```text
+Update
+→ Position/Yaw/Pitch 변경
+
+Render
+→ GetViewMatrix
+→ GetProjectionMatrix
+→ CameraBuffer Map
+→ 행렬 전치 후 저장
+→ CameraBuffer Unmap
+→ VSSetConstantBuffers
+→ DrawIndexed
+```
+
+현재 CameraBuffer는 CPU가 자주 쓰는 동적 버퍼다.
+
+```cpp
+CameraDesc.Usage = D3D11_USAGE_DYNAMIC;
+CameraDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+```
+
+`Map(..., D3D11_MAP_WRITE_DISCARD, ...)`는 이전 내용을 보존할 필요가 없으니 CPU가 새 내용을 쓸 공간을 요청한다. `MappedResource.pData`를 `CameraBufferData*`로 해석해 View와 Projection을 저장하고 `Unmap`하여 기록을 끝낸다.
+
+```cpp
+XMStoreFloat4x4(
+    &CameraData->View,
+    XMMatrixTranspose(MainCamera.GetViewMatrix()));
+```
+
+현재 HLSL이 `mul(vector, matrix)` 순서로 행렬을 사용하므로 CPU에서 만든 DirectXMath 행렬을 전치해서 전달한다. 이것은 카메라 수학 자체가 바뀌는 것이 아니라 CPU와 HLSL이 행렬 메모리를 해석하는 규칙을 맞추는 과정이다.
+
+---
+
+### 21. 이번 단계에서 사용한 함수 빠른 사전
+
+| 함수 | 입력과 결과 | 현재 사용 목적 |
+|---|---|---|
+| `std::sin`, `std::cos` | 라디안 각도 → 삼각함수 값 | Yaw/Pitch로 Forward 계산 |
+| `std::sqrt` | 값의 제곱근 | WASD 입력 벡터 길이 계산 |
+| `std::clamp` | 값을 최소·최대 범위로 제한 | Pitch를 ±89도로 제한 |
+| `XMConvertToRadians` | degree → radian | FOV, Pitch 제한, 마우스 감도 |
+| `XMVectorSet` | x, y, z, w로 계산 벡터 생성 | Forward와 WorldUp 생성 |
+| `XMLoadFloat3` | `XMFLOAT3` → `XMVECTOR` | Position 계산 시작 |
+| `XMStoreFloat3` | `XMVECTOR` → `XMFLOAT3` | 이동 결과 Position 저장 |
+| `XMVectorSetY` | Y 성분을 바꾼 새 벡터 반환 | 지면 Forward의 수직 성분 제거 |
+| `XMVector3Normalize` | XYZ 방향 유지, 길이 1 | Forward/Right/Up과 이동 방향 정규화 |
+| `XMVector3Cross` | 두 벡터의 외적 | Right와 CameraUp 계산 |
+| `XMVectorScale` | 벡터 × 스칼라 | 방향에 실제 이동 거리 적용 |
+| `XMVectorAdd` | 두 벡터 덧셈 | 현재 위치에 이동량 추가 |
+| `XMMatrixLookToLH` | 위치·방향·Up → View 행렬 | 움직이는 FPS 카메라 View 계산 |
+| `XMMatrixPerspectiveFovLH` | FOV·종횡비·Near/Far → Projection | 원근 투영 계산 |
+| `XMMatrixTranspose` | 행과 열 교환 | HLSL 행렬 해석 규칙에 맞춰 전송 |
+| `GetAsyncKeyState` | 키의 현재 비트 상태 | WASD 눌림 확인 |
+| `GetClientRect` | HWND → 클라이언트 RECT | 게임 화면 내부 중앙 계산 |
+| `ClientToScreen` | 클라이언트 POINT → 화면 POINT | 커서와 같은 좌표계로 변환 |
+| `GetCursorPos` | 현재 화면 좌표의 커서 위치 | 중앙과 비교할 마우스 위치 획득 |
+| `SetCursorPos` | 화면 좌표로 커서 이동 | 상대 이동을 계속 얻도록 중앙 복귀 |
+| `ShowCursor` | 운영체제 커서 표시 카운터 변경 | FPS 조작 중 시스템 커서 숨김 |
+| `Map` | GPU 리소스의 CPU 쓰기 주소 요청 | CameraBuffer/ObjectBuffer 갱신 |
+| `Unmap` | CPU 접근 종료 | 작성한 버퍼 데이터를 GPU 사용 가능 상태로 전환 |
+
+---
+
+### 22. 현재 한 프레임의 전체 흐름
+
+```text
+GameLoop::Run
+│
+├─ Windows::PeekMSG
+├─ Timer::GetDeltaTime
+│
+├─ LightSaverGame::Update
+│  ├─ 큐브 Rotation 증가
+│  ├─ WASD 키 상태 수집
+│  ├─ 대각선 입력 길이 보정
+│  ├─ CameraSpeed × deltaTime 계산
+│  ├─ Camera Position 이동
+│  ├─ 클라이언트 중앙을 Screen 좌표로 변환
+│  ├─ 마우스 DeltaX/DeltaY 계산
+│  └─ Camera Yaw/Pitch 갱신
+│
+├─ LightSaverGame::Render
+│  ├─ Camera Forward/Right/Up 계산
+│  ├─ View/Projection 계산
+│  ├─ CameraBuffer 갱신
+│  ├─ 큐브 World 계산
+│  ├─ ObjectBuffer 갱신
+│  ├─ 렌더링 파이프라인 바인딩
+│  └─ DrawIndexed(36, 0, 0)
+│
+└─ Graphics::Present
+```
+
+카메라는 CPU에서 위치와 방향을 계산하고, CameraBuffer는 그 결과를 GPU Vertex Shader에 전달한다. 이 경계를 이해하면 나중에 CameraComponent와 Renderer를 분리할 때 어떤 코드가 어디로 가야 하는지 판단할 수 있다.
+
+---
+
+### 23. 다음 구조 단계와의 연결
+
+현재 `LightSaverGame`은 여전히 큐브의 Mesh, Shader, Constant Buffer와 Draw 명령을 모두 가지고 있다. 다음 단계에서는 결과를 바꾸지 않은 채 책임만 분리한다.
+
+```text
+VS + PS + InputLayout + HLSL 컴파일
+→ Shader
+
+VertexBuffer + IndexBuffer + Stride + IndexCount
+→ Mesh
+
+Shader + Texture + 렌더 상태
+→ Material
+
+Transform + Mesh 참조 + Material 참조
+→ MeshComponent
+
+CameraBuffer/ObjectBuffer 갱신 + 바인딩 + Draw
+→ Renderer
+```
+
+Camera는 계속 Position/Yaw/Pitch와 View/Projection 계산을 담당한다. 나중에 Actor/Component 구조가 생기면 Camera 자체를 없애기보다 CameraComponent 또는 PlayerCamera 역할로 확장한다.

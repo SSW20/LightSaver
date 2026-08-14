@@ -2,6 +2,7 @@
 #include "GameLoop.h"
 #include <dxgi.h>
 #include <DirectXMath.h>
+#include "Camera.h"
 
 struct Vertex
 {
@@ -46,4 +47,8 @@ private:
 	ID3D11Buffer* ObjectBuffer = nullptr;
 	float Rotation = 0.0f;
 	float clearColor[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
+	Camera MainCamera;
+	float CameraSpeed = 3.0f;
+	// 픽셀당 회전할 라디안 값
+	float MouseSpeed = DirectX::XMConvertToRadians(0.1f);
 };

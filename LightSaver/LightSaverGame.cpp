@@ -1,5 +1,5 @@
 #include "LightSaverGame.h"
-
+#include <cmath>
 bool LightSaverGame::OnInitialize()
 {
 	Vertex vertices[] =
@@ -114,30 +114,59 @@ bool LightSaverGame::OnInitialize()
 	result = GetGraphics().Device->CreateBuffer(&ObjectDesc, nullptr, &ObjectBuffer);
 	if (FAILED(result)) return false;
 
-	DirectX::XMVECTOR cameraPosition = DirectX::XMVectorSet(0.0f, 0.0f, -3.0f, 1.0f);
-	DirectX::XMVECTOR cameraTarget = DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
-	DirectX::XMVECTOR cameraUp = DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
-
-	DirectX::XMMATRIX View = DirectX::XMMatrixLookAtLH(cameraPosition, cameraTarget, cameraUp);
-	DirectX::XMMATRIX Projection = DirectX::XMMatrixPerspectiveFovLH(DirectX::XM_PIDIV4, 1280.f / 720.f, 0.1f, 100.f);
-
-	D3D11_MAPPED_SUBRESOURCE MappedResource = {};
-	result = GetGraphics().DeviceContext->Map(CameraBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
-
-	if (FAILED(result)) return false;
-
-	CameraBufferData* CameraData = static_cast<CameraBufferData*>(MappedResource.pData);
-	DirectX::XMStoreFloat4x4(&CameraData->View, DirectX::XMMatrixTranspose(View));
-	DirectX::XMStoreFloat4x4(&CameraData->Projection, DirectX::XMMatrixTranspose(Projection));
-	GetGraphics().DeviceContext->Unmap(CameraBuffer, 0);
-
+	ShowCursor(FALSE);
     return true;
 }
 
 void LightSaverGame::Update(float deltaTime)
 {
 	Rotation += deltaTime;
+	float ForwardInput = 0.f;
+	float RightInput = 0.f;
+	if (GetAsyncKeyState('W') & 0x8000)
+	{
+		ForwardInput += 1.f;
+	}
+	if (GetAsyncKeyState('A') & 0x8000)
+	{
+		RightInput -= 1.f;
+	}
+	if (GetAsyncKeyState('S') & 0x8000)
+	{
+		ForwardInput -= 1.f;
+	}
+	if (GetAsyncKeyState('D') & 0x8000)
+	{
+		RightInput += 1.f;
+	}
 
+	float InputDistance = std::sqrt(ForwardInput * ForwardInput + RightInput * RightInput);
+	if (InputDistance > 1.0f)
+	{
+		ForwardInput /= InputDistance;
+		RightInput /= InputDistance;
+	}
+	float MoveDistance = CameraSpeed * deltaTime;
+	MainCamera.AddForward(ForwardInput * MoveDistance);
+	MainCamera.AddRight(RightInput * MoveDistance);
+
+	RECT ClientSize;
+	GetClientRect(GetWindow().GetHWND(), &ClientSize);
+
+	POINT Center;
+	Center.x = (ClientSize.left + ClientSize.right) / 2;
+	Center.y = (ClientSize.top + ClientSize.bottom) / 2;
+
+	ClientToScreen(GetWindow().GetHWND(), &Center);
+
+	POINT MousePos;
+	GetCursorPos(&MousePos);
+
+	long DeltaX = MousePos.x - Center.x;
+	long DeltaY = MousePos.y - Center.y;
+
+	MainCamera.AddRotation(DeltaX * MouseSpeed, -DeltaY * MouseSpeed);
+	SetCursorPos(Center.x, Center.y);
 }
 
 bool LightSaverGame::Render()
@@ -145,7 +174,17 @@ bool LightSaverGame::Render()
 	HRESULT result;
 
 	DirectX::XMMATRIX World = DirectX::XMMatrixRotationY(Rotation);
+
 	D3D11_MAPPED_SUBRESOURCE MappedResource = {};
+	result = GetGraphics().DeviceContext->Map(CameraBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
+
+	if (FAILED(result)) return false;
+
+	CameraBufferData* CameraData = static_cast<CameraBufferData*>(MappedResource.pData);
+	DirectX::XMStoreFloat4x4(&CameraData->View, DirectX::XMMatrixTranspose(MainCamera.GetViewMatrix()));
+	DirectX::XMStoreFloat4x4(&CameraData->Projection, DirectX::XMMatrixTranspose(MainCamera.GetProjectionMatrix()));
+	GetGraphics().DeviceContext->Unmap(CameraBuffer, 0);
+
 	result = GetGraphics().DeviceContext->Map(ObjectBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
 
 	if (FAILED(result)) return false;
