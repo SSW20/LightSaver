@@ -2266,3 +2266,340 @@ DYNAMIC Constant Buffer는 Map/Unmap과 WRITE_DISCARD로 자주 갱신할 수 �
 회전 행렬은 sin과 cos로 각 정점의 축 성분을 다시 계산한다.
 행렬 곱셈 순서는 결과에 직접 영향을 주므로 프로젝트 전체에서 일관되게 유지해야 한다.
 ```
+
+---
+
+## 2026-08-14 — Window, Timer, Graphics, GameLoop 분리와 실행 경로 재구성
+
+### 1. 이번 구조 변경의 목적
+
+기존 프로그램은 `WinMain` 하나가 다음 역할을 모두 담당했다.
+
+```text
+Win32 창 생성
+메시지 처리
+시간 계산
+Direct3D 11 초기화
+큐브 리소스 생성
+게임 상태 갱신
+렌더링
+COM 리소스 해제
+```
+
+큐브 하나를 출력하는 단계에서는 실행 순서를 한 파일에서 확인하기 쉽다는 장점이 있다. 하지만 오브젝트, 입력, 카메라, 조명과 게임 규칙이 추가되면 `WinMain`이 모든 시스템의 세부 구현을 알아야 한다. 이번 작업에서는 렌더링 결과를 바꾸는 대신 프로그램의 수명과 매 프레임 실행 순서를 클래스로 분리했다.
+
+현재 실행 구조는 다음과 같다.
+
+```text
+WinMain
+└─ LightSaverGame : public GameLoop
+   ├─ GameLoop
+   │  ├─ Windows
+   │  ├─ Timer
+   │  └─ Graphics
+   │
+   └─ LightSaverGame
+      ├─ 큐브 GPU 리소스
+      ├─ OnInitialize
+      ├─ Update
+      └─ Render
+```
+
+`LightSaverGame`이 `GameLoop` 객체를 멤버로 가지는 것이 아니라 `GameLoop`를 상속한다. `GameLoop`는 실행 순서를 제공하고, `LightSaverGame`은 게임마다 달라지는 초기화·업데이트·렌더링 동작을 구현한다.
+
+---
+
+### 2. WinMain의 최종 역할
+
+현재 `WinMain`은 다음 세 가지 일만 한다.
+
+```text
+1. LightSaverGame 객체 생성
+2. Initialize 호출
+3. Run 호출 후 반환
+```
+
+프로그램 진입점은 더 이상 창, D3D11 버퍼, 셰이더와 메시지 루프의 세부 구현을 알지 않는다. 실행 흐름은 다음과 같다.
+
+```text
+Windows가 WinMain 호출
+        ↓
+LightSaverGame 생성
+        ↓
+GameLoop::Initialize
+        ↓
+GameLoop::Run
+        ↓
+WinMain에 종료 코드 반환
+```
+
+기존 큐브 코드는 이전 동작과 새 구조를 비교할 수 있도록 `#if 0`과 `#endif` 사이에 임시 보관했다. 전처리기의 조건이 `0`, 즉 거짓이므로 그 구간은 컴파일 전에 제거된다. 새 구조의 이전이 끝난 뒤에는 Git 기록을 통해 복구할 수 있으므로 제거할 수 있다.
+
+---
+
+### 3. GameLoop가 담당하는 실행 순서
+
+`GameLoop`는 게임마다 반복되는 공통 실행 골격을 가진다.
+
+```text
+GameLoop::Initialize
+├─ Windows::Initialize
+├─ Graphics::Initialize
+├─ LightSaverGame::OnInitialize
+└─ initialized = true
+
+GameLoop::Run
+└─ while (isRunning)
+   ├─ Windows::PeekMSG
+   ├─ Timer::GetDeltaTime
+   ├─ LightSaverGame::Update
+   ├─ LightSaverGame::Render
+   └─ SwapChain::Present
+```
+
+`OnInitialize`, `Update`, `Render`는 가상 함수다. `GameLoop` 코드 안에서 호출하지만 실제 객체가 `LightSaverGame`이므로 런타임에는 `LightSaverGame`이 재정의한 함수가 호출된다. 이것이 다형성을 사용해 공통 루프와 게임별 동작을 분리한 부분이다.
+
+```cpp
+virtual bool OnInitialize() = 0;
+virtual void Update(float deltaTime) = 0;
+virtual bool Render() = 0;
+```
+
+순수 가상 함수 `= 0`을 가진 `GameLoop`는 그 자체로 실행할 수 없는 추상 클래스다. 반드시 이를 상속하고 세 함수를 구현한 구체 클래스가 필요하다.
+
+---
+
+### 4. initialized와 isRunning의 차이
+
+두 변수는 서로 다른 상태를 나타낸다.
+
+```text
+initialized
+└─ Window, Graphics, 게임 리소스 초기화가 전부 성공했는가?
+
+isRunning
+└─ 초기화가 끝난 프로그램이 현재 반복 실행 중인가?
+```
+
+`Run`이 초기화 전에 호출되면 필요한 Window, SwapChain과 Device가 없으므로 접근 오류가 발생할 수 있다. `initialized`는 이 잘못된 호출 순서를 차단한다.
+
+`isRunning`은 실행 중 `RequestExit()`가 호출되었을 때 루프를 끝내기 위한 상태다. 따라서 초기화 성공 여부와 현재 실행 여부는 같은 `bool` 하나로 합치지 않고 분리한다.
+
+---
+
+### 5. Windows, Timer, Graphics의 소유 관계
+
+`GameLoop`가 세 시스템을 값 멤버로 소유한다.
+
+```cpp
+Windows windows;
+Graphics graphics;
+Timer timer;
+```
+
+전역 변수나 Singleton을 사용하지 않아도 `GameLoop`의 수명 동안 세 객체가 함께 존재한다. `LightSaverGame`은 보호 함수 `GetGraphics()`를 통해 이미 생성된 `Graphics`에 접근한다.
+
+```text
+GetGraphics()가 하는 일
+└─ 새 Graphics 객체 생성 X
+   GameLoop가 가진 기존 Graphics 객체의 참조 반환 O
+```
+
+복사를 막기 위해 `GameLoop`의 복사 생성자와 복사 대입 연산자는 삭제했다. Window 핸들과 COM 포인터를 가진 객체가 얕게 복사되면 같은 운영체제/GPU 리소스를 여러 객체가 해제할 위험이 있기 때문이다.
+
+---
+
+### 6. LightSaverGame의 현재 책임은 임시 단계다
+
+현재 `LightSaverGame`은 큐브 하나를 새 게임 루프에서 다시 출력하기 위해 다음 리소스를 직접 가진다.
+
+```text
+VertexBuffer
+IndexBuffer
+VertexShader
+PixelShader
+InputLayout
+CameraBuffer
+ObjectBuffer
+Viewport
+Rotation
+ClearColor
+```
+
+이 구조는 최종 구조가 아니다. 기존 `WinMain`에서 기능을 안전하게 옮기고 실행 결과가 동일한지 확인하는 중간 단계다. 이후 분리 방향은 다음과 같다.
+
+```text
+VertexBuffer + IndexBuffer      → Mesh
+VS + PS + InputLayout           → Shader
+Shader + Texture + 재질 값       → Material
+Mesh와 Material 참조             → MeshComponent
+Clear/바인딩/DrawIndexed         → Renderer
+Rotation과 World Transform       → Actor/SceneComponent
+Camera View/Projection           → CameraComponent와 Renderer
+```
+
+두 몬스터가 같은 모델을 사용할 경우 각 Actor가 GPU 버퍼를 따로 만드는 것이 아니라 같은 `Mesh`를 참조하고 서로 다른 World 행렬로 그리게 된다.
+
+---
+
+### 7. OnInitialize에서 생성되는 리소스
+
+현재 `LightSaverGame::OnInitialize`의 작업 순서는 다음과 같다.
+
+```text
+큐브 정점 배열 준비
+→ Vertex Buffer 생성
+→ 큐브 인덱스 배열 준비
+→ Index Buffer 생성
+→ HLSL Vertex/Pixel Shader 컴파일
+→ Vertex Shader와 Pixel Shader 생성
+→ Input Layout 생성
+→ 임시 Shader Blob 해제
+→ Viewport 설정
+→ Camera/Object Constant Buffer 생성
+→ 고정 카메라 View/Projection 최초 업로드
+```
+
+정점과 인덱스 배열, 각종 `D3D11_*_DESC`, `HRESULT`, Shader Blob은 초기화 함수 안에서만 필요하므로 지역변수다. 반대로 생성된 GPU 리소스는 이후 프레임에서도 사용하므로 `LightSaverGame`의 멤버다.
+
+```text
+지역변수
+└─ 함수가 끝나면 필요 없음
+
+멤버변수
+└─ OnInitialize에서 생성한 뒤 Render와 소멸자에서도 사용
+```
+
+---
+
+### 8. 고정 CameraBuffer를 초기화에서 한 번 기록하는 이유
+
+다음 호출은 GPU 버퍼 공간을 만들지만 초기 데이터는 전달하지 않는다.
+
+```cpp
+CreateBuffer(&CameraDesc, nullptr, &CameraBuffer);
+```
+
+두 번째 인수가 `nullptr`이므로 View와 Projection은 아직 들어 있지 않다. 따라서 생성 직후 다음 순서로 최초 데이터를 기록한다.
+
+```text
+Map(CameraBuffer, WRITE_DISCARD)
+→ CPU가 쓸 주소 획득
+→ View와 Projection 전치 후 저장
+→ Unmap(CameraBuffer)
+```
+
+기존 `main.cpp`에서는 카메라가 움직이지 않는데도 같은 View/Projection을 매 프레임 다시 기록했다. 현재 큐브 단계의 카메라는 고정되어 있으므로 초기화에서 한 번만 기록한다.
+
+나중에 WASD와 마우스 카메라를 구현하면 View 행렬이 매 프레임 변한다. 그 단계에서는 CameraComponent가 상태를 계산하고 Renderer가 변경된 값을 CameraBuffer에 다시 업로드한다.
+
+---
+
+### 9. Update와 Render의 책임 분리
+
+현재 `Update`는 CPU 게임 상태만 바꾼다.
+
+```cpp
+Rotation += deltaTime;
+```
+
+`Render`는 회전 상태로 World 행렬을 계산하고 GPU ObjectBuffer를 갱신한 뒤 실제 그리기 명령을 실행한다.
+
+```text
+Update
+└─ Rotation 변경
+
+Render
+├─ XMMatrixRotationY로 World 계산
+├─ ObjectBuffer Map/Unmap
+├─ RenderTarget/DepthStencil 설정 및 Clear
+├─ Viewport 설정
+├─ Input Assembler 설정
+├─ Constant Buffer와 Shader 바인딩
+└─ DrawIndexed(36, 0, 0)
+```
+
+ObjectBuffer 갱신을 `Render`에 둔 이유는 `Map/Unmap`이 GPU에 전달할 렌더링 데이터를 준비하는 작업이기 때문이다. 또한 `Render`는 `bool`을 반환하므로 `Map` 실패를 `GameLoop`에 전달할 수 있다. `void Update`에서 단순히 `return`하면 렌더링이 계속되어 이전 프레임의 데이터로 그려질 수 있다.
+
+---
+
+### 10. Present는 GameLoop에서 한 번만 호출한다
+
+`LightSaverGame::Render`는 Back Buffer에 그리기만 하고 화면 교체는 하지 않는다.
+
+```text
+LightSaverGame::Render
+└─ DrawIndexed까지 수행
+
+GameLoop::Run
+└─ Render 성공 후 Present(1, 0)
+```
+
+게임별 Render마다 `Present`를 호출하면 공통 루프가 프레임 종료와 오류 처리를 제어할 수 없다. Present를 `GameLoop` 한 곳에 두면 한 프레임에 정확히 한 번 호출된다는 규칙이 생긴다.
+
+`Present(1, 0)`의 첫 번째 인수 `1`은 수직 동기화를 사용해 다음 화면 갱신 시점에 표시하라는 뜻이다.
+
+---
+
+### 11. COM 리소스 수명과 소멸 순서
+
+`LightSaverGame`은 자신이 생성한 COM 리소스를 소멸자에서 해제한다.
+
+```text
+ObjectBuffer
+CameraBuffer
+IndexBuffer
+VertexBuffer
+InputLayout
+PixelShader
+VertexShader
+```
+
+초기화가 중간에 실패할 수 있으므로 모든 포인터는 `nullptr`로 시작한다. 소멸자는 각 포인터가 `nullptr`이 아닐 때만 `Release()`한다. 그러면 생성에 성공한 리소스만 안전하게 해제된다.
+
+상속 객체가 파괴될 때는 파생 클래스 부분이 먼저 파괴되고 그다음 기반 클래스가 파괴된다.
+
+```text
+LightSaverGame 소멸자
+→ 큐브의 Buffer와 Shader Release
+→ GameLoop 소멸
+→ GameLoop가 가진 Graphics 소멸
+→ DeviceContext, SwapChain, Device 등 Release
+```
+
+따라서 큐브 GPU 리소스는 그것을 만든 Graphics Device보다 먼저 해제된다.
+
+---
+
+### 12. FOV는 라디안 단위다
+
+`XMMatrixPerspectiveFovLH`의 첫 번째 인수는 도(degree)가 아니라 라디안이다.
+
+```cpp
+DirectX::XMMatrixPerspectiveFovLH(
+    DirectX::XM_PIDIV4,
+    1280.f / 720.f,
+    0.1f,
+    100.f);
+```
+
+`XM_PIDIV4`는 π/4 라디안이며 45도와 같다. `45.f`를 직접 전달하면 45도가 아니라 45라디안으로 해석된다. 실수 타입 자체는 올바르므로 컴파일러는 오류를 내지 않지만 투영 결과는 잘못된다. 이것은 문법 오류가 아니라 API 단위 계약을 어긴 의미상 오류다.
+
+---
+
+### 13. 현재 단계에서 얻은 구조적 기준
+
+```text
+WinMain은 조립과 실행만 담당한다.
+GameLoop는 매 프레임 실행 순서를 소유한다.
+Windows는 Win32 창과 메시지를 담당한다.
+Timer는 프레임 간 시간 차이를 계산한다.
+Graphics는 Direct3D Device/Context/SwapChain과 기본 Target을 소유한다.
+LightSaverGame은 현재 게임별 초기화·상태·렌더링을 구현한다.
+Update는 게임 상태를 변경한다.
+Render는 GPU 데이터 갱신과 그리기 명령을 담당한다.
+Present는 공통 GameLoop에서 한 번만 호출한다.
+COM 리소스는 소유한 객체가 해제한다.
+```
+
+다음 구조 단계에서는 `Mesh`를 만들어 Vertex/Index Buffer의 소유권과 생성 코드를 `LightSaverGame`에서 분리한다. 이후 Shader, Renderer, World, Actor, Component 순으로 확장한다.
