@@ -3402,3 +3402,741 @@ CameraBuffer/ObjectBuffer 갱신 + 바인딩 + Draw
 ```
 
 Camera는 계속 Position/Yaw/Pitch와 View/Projection 계산을 담당한다. 나중에 Actor/Component 구조가 생기면 Camera 자체를 없애기보다 CameraComponent 또는 PlayerCamera 역할로 확장한다.
+
+---
+
+## 2026-08-17 — Shader와 Mesh 분리, 렌더링 리소스 구조
+
+이번 단계의 목표는 새로운 그래픽 효과를 추가하는 것이 아니라, `LightSaverGame` 안에 한 덩어리로 들어 있던 렌더링 리소스를 역할에 따라 분리하는 것이었다.
+
+분리 전에는 `LightSaverGame`이 다음 일을 전부 수행했다.
+
+```text
+LightSaverGame
+├─ HLSL 컴파일
+├─ Vertex Shader / Pixel Shader 생성
+├─ InputLayout 생성
+├─ VertexBuffer / IndexBuffer 생성
+├─ 모든 리소스 바인딩
+├─ 카메라와 오브젝트 상수 버퍼 갱신
+└─ DrawIndexed 호출
+```
+
+작은 큐브 하나만 그릴 때는 동작하지만 모델과 머티리얼이 늘어나면 어떤 코드가 어떤 리소스를 소유하는지 알기 어려워진다. 그래서 이번에는 화면에 나타나는 결과는 그대로 유지하고 다음 두 책임만 먼저 떼어 냈다.
+
+```text
+Shader
+├─ HLSL 파일 컴파일
+├─ Vertex Shader 소유
+├─ Pixel Shader 소유
+├─ InputLayout 소유
+└─ 파이프라인에 Shader 상태 바인딩
+
+Mesh
+├─ VertexBuffer 소유
+├─ IndexBuffer 소유
+├─ Stride 보관
+├─ IndexCount 보관
+└─ Input Assembler에 Mesh 상태 바인딩
+```
+
+`LightSaverGame`에는 현재 카메라 및 오브젝트 상수 버퍼 갱신과 `DrawIndexed`가 남아 있다. 이는 아직 Renderer를 만들지 않았기 때문이다. 한 번에 모든 구조를 바꾸기보다 실제로 동작하는 상태를 유지하면서 책임을 한 단계씩 이동시키는 과정이다.
+
+---
+
+### 1. Device는 만들고, DeviceContext는 사용한다
+
+Shader와 Mesh 코드에 공통적으로 등장하는 두 포인터는 역할이 다르다.
+
+```cpp
+ID3D11Device* Device;
+ID3D11DeviceContext* DeviceContext;
+```
+
+`ID3D11Device`는 GPU 리소스를 생성할 때 사용한다.
+
+```cpp
+Device->CreateVertexShader(...);
+Device->CreatePixelShader(...);
+Device->CreateInputLayout(...);
+Device->CreateBuffer(...);
+```
+
+반면 `ID3D11DeviceContext`는 이미 생성한 리소스를 파이프라인에 연결하거나 명령을 기록할 때 사용한다.
+
+```cpp
+DeviceContext->IASetInputLayout(...);
+DeviceContext->IASetVertexBuffers(...);
+DeviceContext->VSSetShader(...);
+DeviceContext->PSSetShader(...);
+DeviceContext->DrawIndexed(...);
+```
+
+쉽게 비유하면 Device는 장비 제작소이고 DeviceContext는 제작된 장비를 현재 작업대에 설치하고 사용하는 조작판이다.
+
+```text
+초기화 시점
+CPU 데이터 + Device
+→ GPU 리소스 생성
+
+렌더링 시점
+GPU 리소스 + DeviceContext
+→ 파이프라인에 바인딩
+→ Draw 명령
+```
+
+이 구분 때문에 `Shader::Initialize`와 `Mesh::Initialize`는 Device를 받고, `Shader::Bind`와 `Mesh::Bind`는 DeviceContext를 받는다.
+
+---
+
+### 2. Shader 클래스가 담당하는 범위
+
+현재 Shader 클래스가 소유하는 COM 객체는 세 개다.
+
+```cpp
+ID3D11VertexShader* VS = nullptr;
+ID3D11PixelShader* PS = nullptr;
+ID3D11InputLayout* InputLayout = nullptr;
+```
+
+#### 2.1 HLSL 컴파일
+
+```cpp
+ID3DBlob* VSBlob = nullptr;
+ID3DBlob* PSBlob = nullptr;
+ID3DBlob* ErrBlob = nullptr;
+
+HRESULT result = D3DCompileFromFile(
+    FilePath,
+    nullptr,
+    D3D_COMPILE_STANDARD_FILE_INCLUDE,
+    "VS",
+    "vs_5_0",
+    0,
+    0,
+    &VSBlob,
+    &ErrBlob);
+```
+
+HLSL 소스 코드는 GPU가 바로 실행할 수 없다. `D3DCompileFromFile`이 텍스트 HLSL을 셰이더 바이트코드로 컴파일하고, 결과를 `ID3DBlob` 안에 보관한다.
+
+- `FilePath`: 컴파일할 HLSL 파일 경로
+- `"VS"`: HLSL 안에서 시작할 진입 함수 이름
+- `"vs_5_0"`: Vertex Shader 5.0 프로필
+- `&VSBlob`: 성공했을 때 컴파일된 바이트코드를 받을 곳
+- `&ErrBlob`: 실패했을 때 컴파일 메시지를 받을 곳
+- 반환값 `HRESULT`: 함수 성공 또는 실패 여부
+
+Pixel Shader도 같은 방식이며 진입점과 프로필만 `PS`, `ps_5_0`으로 달라진다.
+
+#### 2.2 Blob은 Shader 자체가 아니다
+
+`VSBlob`은 Vertex Shader 객체가 아니라 컴파일된 바이트코드를 담는 임시 메모리다.
+
+```text
+Shader.hlsl 텍스트
+    ↓ D3DCompileFromFile
+VSBlob 바이트코드
+    ↓ CreateVertexShader
+ID3D11VertexShader GPU 객체
+```
+
+또한 InputLayout 생성에도 Vertex Shader의 입력 서명이 필요하므로 같은 `VSBlob`을 사용한다.
+
+```cpp
+Device->CreateInputLayout(
+    layout,
+    ARRAYSIZE(layout),
+    VSBlob->GetBufferPointer(),
+    VSBlob->GetBufferSize(),
+    &InputLayout);
+```
+
+Vertex Shader와 InputLayout 생성이 끝나면 Blob의 임무도 끝난다. 따라서 성공 경로 마지막에서 `Release`한다.
+
+```cpp
+VSBlob->Release();
+PSBlob->Release();
+```
+
+현재 코드는 컴파일이나 생성 도중 실패하는 경로에서 이미 만들어진 Blob이 남을 수 있다. 기능을 먼저 분리한 현재 단계의 정리 대상이며, 이후에는 `Microsoft::WRL::ComPtr`를 사용하거나 모든 실패 경로를 한곳에서 정리하도록 개선한다.
+
+#### 2.3 컴파일 오류 문자열 확인
+
+HLSL 컴파일에 실패하면 `ErrBlob`에는 사람이 읽을 수 있는 오류 메시지가 들어갈 수 있다.
+
+```cpp
+if (ErrBlob != nullptr)
+{
+    OutputDebugStringA(
+        static_cast<const char*>(
+            ErrBlob->GetBufferPointer()));
+}
+```
+
+`GetBufferPointer()`의 반환형은 `void*`다. Blob은 어떤 종류의 바이트든 담을 수 있으므로 Direct3D가 그 안의 실제 자료형을 강제하지 않는다. 여기서는 내용이 ANSI 문자열이라는 것을 알고 있으므로 `const char*`로 해석한다.
+
+`OutputDebugStringA`의 `A`는 `char` 문자열 버전을 의미한다. 이 캐스팅은 문자열을 변환하는 연산이 아니라, 같은 메모리를 문자 배열로 해석하겠다고 컴파일러에 알려 주는 것이다. 출력은 Visual Studio의 Output 창에서 확인한다.
+
+`ErrBlob` 역시 COM 객체이므로 사용이 끝나면 `Release`해야 한다. 이 오류 출력과 실패 경로 정리는 다음 리팩터링 때 추가할 항목이다.
+
+#### 2.4 Shader 객체 생성과 바인딩은 다르다
+
+```cpp
+Device->CreateVertexShader(..., &VS);
+Device->CreatePixelShader(..., &PS);
+```
+
+위 코드는 GPU에서 사용할 객체를 생성할 뿐, 현재 Draw에 사용할 셰이더로 선택한 것은 아니다. 실제 파이프라인 연결은 `Bind`가 수행한다.
+
+```cpp
+void Shader::Bind(ID3D11DeviceContext* DeviceContext)
+{
+    DeviceContext->IASetInputLayout(InputLayout);
+    DeviceContext->VSSetShader(VS, nullptr, 0);
+    DeviceContext->PSSetShader(PS, nullptr, 0);
+}
+```
+
+여러 셰이더를 사용하는 게임에서는 오브젝트나 패스마다 현재 셰이더가 바뀔 수 있으므로 생성과 바인딩을 구분해야 한다.
+
+---
+
+### 3. InputLayout은 Vertex Buffer의 설명서다
+
+현재 정점 구조는 위치만 갖는다.
+
+```cpp
+struct Vertex
+{
+    float x;
+    float y;
+    float z;
+};
+```
+
+이에 대응하는 InputLayout은 다음과 같다.
+
+```cpp
+D3D11_INPUT_ELEMENT_DESC layout[] =
+{
+    {
+        "POSITION",
+        0,
+        DXGI_FORMAT_R32G32B32_FLOAT,
+        0,
+        0,
+        D3D11_INPUT_PER_VERTEX_DATA,
+        0
+    }
+};
+```
+
+GPU는 VertexBuffer를 그저 연속된 바이트로 본다. InputLayout이 있어야 한 정점에서 몇 바이트를 어떤 형식과 Semantic으로 읽을지 알 수 있다.
+
+```text
+VertexBuffer의 12바이트
+┌───────────┬───────────┬───────────┐
+│ float x   │ float y   │ float z   │
+└───────────┴───────────┴───────────┘
+              ↓ InputLayout
+HLSL의 float3 Position : POSITION
+```
+
+다음 텍스처 단계에서 정점에 UV가 추가되면 구조와 InputLayout을 함께 바꿔야 한다.
+
+```cpp
+struct Vertex
+{
+    DirectX::XMFLOAT3 Position; // 12 bytes
+    DirectX::XMFLOAT2 UV;       // 8 bytes
+};                              // total 20 bytes
+```
+
+```cpp
+{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 }
+```
+
+InputLayout의 Semantic과 HLSL 입력 구조의 Semantic은 일치해야 한다.
+
+---
+
+### 4. Mesh는 모양을 그리는 GPU 데이터 묶음이다
+
+현재 Mesh 클래스는 다음 상태를 소유한다.
+
+```cpp
+ID3D11Buffer* VertexBuffer = nullptr;
+ID3D11Buffer* IndexBuffer = nullptr;
+UINT Stride = sizeof(Vertex);
+UINT IndexCount = 0;
+```
+
+- `VertexBuffer`: 각 정점의 위치 데이터
+- `IndexBuffer`: 어떤 정점을 어떤 순서로 재사용할지 나타내는 번호
+- `Stride`: 다음 정점까지 이동해야 할 바이트 수
+- `IndexCount`: `DrawIndexed`가 읽을 인덱스 개수
+
+Mesh는 월드 위치, 카메라, HLSL 코드 또는 텍스처를 직접 소유하지 않는다. 현재 단계에서 Mesh의 핵심은 정점과 인덱스라는 기하 데이터다.
+
+#### 4.1 CPU 배열에서 GPU Buffer 만들기
+
+```cpp
+D3D11_BUFFER_DESC VertexBufferDesc = {};
+VertexBufferDesc.ByteWidth = sizeof(Vertex) * vertexCount;
+VertexBufferDesc.Usage = D3D11_USAGE_IMMUTABLE;
+VertexBufferDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+
+D3D11_SUBRESOURCE_DATA VertexData = {};
+VertexData.pSysMem = vertices;
+
+Device->CreateBuffer(
+    &VertexBufferDesc,
+    &VertexData,
+    &VertexBuffer);
+```
+
+`ByteWidth`는 요소 개수가 아니라 전체 바이트 수다. 정점 하나의 크기와 정점 개수를 곱해야 한다.
+
+```text
+정점 1개의 크기 = sizeof(Vertex) = 12 bytes
+정점이 8개라면 = 12 × 8 = 96 bytes
+```
+
+IndexBuffer도 같은 원리다.
+
+```cpp
+IndexBufferDesc.ByteWidth = sizeof(UINT) * indexCount;
+IndexBufferDesc.Usage = D3D11_USAGE_IMMUTABLE;
+IndexBufferDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+IndexData.pSysMem = indices;
+```
+
+현재 큐브의 기하 데이터는 실행 중 바뀌지 않으므로 `D3D11_USAGE_IMMUTABLE`이 맞다. 카메라나 World 행렬처럼 매 프레임 바뀌는 값은 Dynamic Constant Buffer와 `Map/Unmap`을 사용하지만, 움직이지 않는 정점 데이터까지 매 프레임 다시 쓸 필요는 없다.
+
+#### 4.2 Stride는 정점 사이의 간격이다
+
+```cpp
+UINT Stride = sizeof(Vertex);
+```
+
+GPU가 첫 번째 정점을 읽은 다음 두 번째 정점으로 가려면 메모리에서 몇 바이트 이동할지 알아야 한다. 이 간격이 Stride다.
+
+```text
+주소 0          : Vertex 0
+주소 Stride     : Vertex 1
+주소 Stride × 2 : Vertex 2
+```
+
+정점에 UV를 추가하여 `sizeof(Vertex)`가 20바이트가 되면 Stride도 자동으로 20바이트가 된다.
+
+---
+
+### 5. IASetVertexBuffers에서 발생했던 접근 위반
+
+Mesh 분리 후 다음 호출에서 `0xC0000005` 읽기 접근 위반이 발생했다.
+
+```cpp
+DeviceContext->IASetVertexBuffers(
+    0,
+    1,
+    &VertexBuffer,
+    &Stride,
+    0);
+```
+
+마지막 인자는 숫자 하나가 아니라 `const UINT* pOffsets`, 즉 오프셋 배열의 주소다.
+
+```cpp
+void IASetVertexBuffers(
+    UINT StartSlot,
+    UINT NumBuffers,
+    ID3D11Buffer* const* ppVertexBuffers,
+    const UINT* pStrides,
+    const UINT* pOffsets);
+```
+
+`NumBuffers`가 1이면 Direct3D는 Stride 한 개와 Offset 한 개를 읽으려고 한다. 그런데 마지막에 `0`을 넘기면 주소 0, 즉 null pointer에서 값을 읽으려 하므로 접근 위반이 발생할 수 있다.
+
+올바른 코드는 실제 `UINT` 변수를 만들고 그 주소를 넘기는 것이다.
+
+```cpp
+UINT Offset = 0;
+
+DeviceContext->IASetVertexBuffers(
+    0,
+    1,
+    &VertexBuffer,
+    &Stride,
+    &Offset);
+```
+
+반면 `IASetIndexBuffer`의 세 번째 인자는 포인터가 아닌 `UINT Offset` 값 자체다.
+
+```cpp
+DeviceContext->IASetIndexBuffer(
+    IndexBuffer,
+    DXGI_FORMAT_R32_UINT,
+    Offset);
+```
+
+두 함수가 비슷해 보이지만 인자의 형식이 다르다.
+
+```text
+IASetVertexBuffers(..., &Stride, &Offset)
+                              주소     주소
+
+IASetIndexBuffer(..., DXGI_FORMAT_R32_UINT, Offset)
+                                            값
+```
+
+VertexBuffer는 한 번에 여러 슬롯을 묶어서 지정할 수 있으므로 버퍼별 Stride와 Offset을 배열로 받는다. IndexBuffer는 한 번에 하나만 지정하므로 Offset 하나를 값으로 받는다.
+
+---
+
+### 6. Bind는 초기화가 아니라 Draw 직전의 상태 선택이다
+
+VertexBuffer와 IndexBuffer를 한 번 만들었다고 해서 영원히 현재 파이프라인에 연결되어 있는 것은 아니다. Direct3D 11의 DeviceContext는 현재 상태를 갖는 상태 머신이다.
+
+```text
+Mesh A Bind
+→ 현재 IA에는 Mesh A가 연결됨
+
+Mesh B Bind
+→ 같은 슬롯이 Mesh B로 교체됨
+
+Mesh A를 다시 그리려면
+→ Mesh A를 다시 Bind해야 함
+```
+
+그래서 Mesh의 GPU 버퍼 생성은 초기화 때 한 번 수행하지만, `Mesh::Bind`는 그 Mesh를 그리기 직전에 호출한다.
+
+현재 한 프레임의 핵심 렌더 순서는 다음과 같다.
+
+```cpp
+DeviceContext->IASetPrimitiveTopology(
+    D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+ShaderSet.Bind(DeviceContext);
+MeshSet.Bind(DeviceContext);
+
+DeviceContext->DrawIndexed(
+    MeshSet.GetIndexCount(),
+    0,
+    0);
+```
+
+이를 파이프라인 흐름으로 보면 다음과 같다.
+
+```text
+Mesh::Bind
+→ IA가 Vertex/Index 데이터를 읽을 준비
+
+Shader::Bind
+→ IA의 데이터 해석법과 VS/PS 선택
+
+Constant Buffer Bind
+→ World/View/Projection 전달
+
+DrawIndexed
+→ 현재까지 설정된 모든 상태를 사용해 실제 그리기 명령 실행
+```
+
+`DrawIndexed`를 Mesh 안에 넣지 않은 이유는 Mesh가 스스로 언제, 어떤 Shader와 Material, 어떤 Transform으로 그려질지 결정하게 만들지 않기 위해서다. 이후 Renderer가 이 조합과 Draw 호출을 담당하게 된다.
+
+---
+
+### 7. 값 멤버와 포인터 멤버의 차이
+
+초기 분리 과정에서 Shader를 다음과 같이 선언하면 문제가 생길 수 있었다.
+
+```cpp
+Shader* ShaderSet = nullptr;
+ShaderSet->Initialize(...); // nullptr을 역참조
+```
+
+포인터 변수만 만든 것은 Shader 객체를 생성한 것이 아니다. `ShaderSet`은 아무 객체도 가리키지 않으므로 멤버 함수를 호출할 수 없다.
+
+현재처럼 게임이 Shader 하나와 Mesh 하나를 직접 소유하는 단계에서는 값 멤버가 간단하다.
+
+```cpp
+Shader ShaderSet;
+Mesh MeshSet;
+
+ShaderSet.Initialize(...);
+MeshSet.Initialize(...);
+```
+
+`LightSaverGame`이 만들어질 때 두 객체도 함께 만들어지고, `LightSaverGame`이 파괴될 때 각 객체의 소멸자도 자동 호출된다. 따라서 현재 단계에서는 별도의 `new/delete`가 필요 없다.
+
+나중에 `ResourceManager`가 여러 Mesh와 Shader를 공유하게 되면 `shared_ptr`, `unique_ptr`, 핸들 또는 리소스 ID 같은 소유 방식을 다시 설계한다. 지금부터 모든 것을 포인터로 만들 필요는 없다.
+
+---
+
+### 8. COM 객체와 소멸자
+
+Direct3D 인터페이스는 COM 객체이므로 사용이 끝나면 `Release`해야 한다.
+
+```cpp
+Shader::~Shader()
+{
+    if (VS != nullptr)
+    {
+        VS->Release();
+        VS = nullptr;
+    }
+
+    if (PS != nullptr)
+    {
+        PS->Release();
+        PS = nullptr;
+    }
+
+    if (InputLayout != nullptr)
+    {
+        InputLayout->Release();
+        InputLayout = nullptr;
+    }
+}
+```
+
+Mesh의 VertexBuffer와 IndexBuffer도 같은 방식으로 정리한다. `nullptr` 검사는 객체 생성이 일부만 성공했거나 초기화가 중간에 실패한 경우에도 소멸자가 안전하게 실행되도록 한다.
+
+현재 방식은 COM 수명 관리를 직접 배우는 단계에는 도움이 된다. 반복되는 `Release`와 실패 경로 누락을 줄이는 다음 수단은 `Microsoft::WRL::ComPtr<T>`다.
+
+```cpp
+Microsoft::WRL::ComPtr<ID3D11Buffer> VertexBuffer;
+```
+
+ComPtr을 사용하면 객체의 수명이 끝날 때 자동으로 Release된다. 다만 자동화 도구를 쓰기 전 현재의 `AddRef/Release` 원리를 먼저 이해하는 것이 중요하다.
+
+---
+
+### 9. OpenGL AimLab 프로젝트와 현재 구조 비교
+
+참고한 OpenGL AimLab 프로젝트에서는 저수준 Mesh 구현을 게임 코드에서 직접 작성하지 않았다.
+
+```cpp
+using CpuMesh = glutil::ModelData;
+using Mesh = glutil::GLModelData;
+```
+
+별도의 `glutil` 라이브러리가 OBJ 로딩과 VAO/VBO/EBO 생성 과정을 감췄다. 그래서 게임 코드에서는 경로를 넘기고 이미 만들어진 Mesh를 받아 사용하는 것처럼 보였다.
+
+현재 LightSaver에서 직접 만든 것과 대응시키면 다음과 같다.
+
+| OpenGL / AimLab | Direct3D 11 / LightSaver |
+|---|---|
+| VBO | VertexBuffer |
+| EBO | IndexBuffer |
+| VAO에 저장된 정점 해석 상태 | VertexBuffer 바인딩 + InputLayout |
+| `glDrawElements` | `DrawIndexed` |
+| `GLProgram` | Shader |
+| model uniform | Object Constant Buffer |
+| `GLModelData` | 현재 Mesh |
+| Model loader가 만든 CPU 데이터 | 미래의 MeshData |
+
+즉, AimLab에서 경로만 넣으면 되었던 것은 Mesh가 필요 없어서가 아니라 로더와 유틸리티 라이브러리 안에 현재 우리가 배우는 과정이 이미 들어 있었기 때문이다.
+
+AimLab의 큰 흐름은 다음과 같았다.
+
+```text
+ModelLoader
+→ CPU ModelData
+→ GLModelData(VAO/VBO/EBO)
+→ ResourceManager가 캐시
+→ MeshRenderer가 Mesh와 Material 참조
+→ Render 시 DrawElements
+```
+
+LightSaver의 목표 흐름도 같은 개념을 Direct3D 11에 맞춰 다음처럼 발전시킨다.
+
+```text
+ModelLoader
+→ CPU MeshData(Vertex/Index 배열)
+→ Mesh가 GPU Vertex/Index Buffer 생성
+→ ResourceManager가 Mesh/Texture/Shader 캐시
+→ MeshComponent가 Mesh/Material 참조
+→ Renderer가 Bind와 DrawIndexed 실행
+```
+
+다만 AimLab의 전역 싱글톤, raw pointer 중심 소유, 컴포넌트가 직접 Draw하는 방식까지 그대로 복사하지는 않는다. 참고할 것은 리소스 로딩과 렌더링 데이터의 분리 원리다.
+
+---
+
+### 10. Texture, Material, ModelLoader는 각각 무엇인가
+
+현재 단계 이후의 클래스는 서로 같은 일을 하지 않는다.
+
+#### Texture
+
+이미지 파일의 픽셀을 GPU 리소스로 올리고 Pixel Shader가 읽을 수 있는 `ShaderResourceView`를 제공한다.
+
+```text
+PNG/DDS 파일
+→ 픽셀 디코딩
+→ ID3D11Texture2D
+→ ID3D11ShaderResourceView
+→ Pixel Shader에서 Sample
+```
+
+#### Material
+
+어떤 Shader와 Texture, 그리고 색상·거칠기 같은 파라미터를 함께 사용할지 나타낸다.
+
+```text
+Material
+├─ Shader 참조
+├─ Texture 참조
+├─ SamplerState 참조
+└─ 색상/광택 등의 파라미터
+```
+
+#### ModelLoader
+
+OBJ 또는 glTF 같은 모델 파일을 읽어 CPU에서 사용할 정점과 인덱스 데이터로 바꾼다. GPU 버퍼를 직접 소유하는 Mesh와 파일 형식을 해석하는 ModelLoader의 책임을 구분한다.
+
+```text
+모델 파일
+→ ModelLoader
+→ MeshData
+→ Mesh::Initialize
+→ GPU Buffer
+```
+
+#### ResourceManager
+
+같은 파일을 여러 번 로드하지 않도록 경로 또는 이름으로 리소스를 캐시하고 공유한다.
+
+```text
+"wall.png" 요청
+→ 이미 캐시에 있으면 기존 Texture 반환
+→ 없으면 로드한 뒤 캐시에 저장하고 반환
+```
+
+로더와 ResourceManager는 최종 목표가 아니다. 실제 공포 게임의 맵, 손전등, 괴물, 발전기를 데이터로 출력하기 위한 기반이다.
+
+---
+
+### 11. 셰이더 학습이 실제 공포 게임으로 이어지는 지점
+
+현재 Shader 클래스는 단순 색상 출력만 다루지만 프로젝트의 핵심 기믹은 셰이더 학습과 직접 연결된다.
+
+```text
+Texture sampling
+→ 모델 표면에 이미지 표현
+
+Normal + 기본 조명
+→ 벽과 괴물의 입체감
+
+Spot Light
+→ 손전등의 원뿔형 빛
+
+Shadow Map + PCF
+→ 손전등 뒤의 그림자와 공포 연출
+
+Fog
+→ 거리 가시성 제한
+
+Post Process
+→ 비네트, 노이즈, 피격/공포 효과
+```
+
+몬스터가 손전등 범위 안에서 멈추는 판정은 CPU 게임플레이 로직이 담당한다. 손전등이 실제로 표면을 밝히는 것은 GPU Shader가 담당한다. 두 기능은 같은 위치, 방향, 각도 개념을 공유하지만 목적이 다르다.
+
+```text
+CPU
+플레이어 → 몬스터 방향
+거리, 내적, 가림 여부 판정
+→ 몬스터 이동 정지
+
+GPU
+각 픽셀 → 손전등 방향/거리 계산
+조명과 그림자 계산
+→ 화면에 빛 표현
+```
+
+이 둘을 같은 데이터에서 출발하게 만들면 화면에서는 빛이 닿는데 몬스터는 움직이거나, 빛이 닿지 않는데 멈추는 불일치를 줄일 수 있다.
+
+---
+
+### 12. 소리는 그래픽 Shader가 아니다
+
+소리도 파동이지만 HLSL 그래픽 셰이더로 처리하는 것은 아니다. 그래픽 셰이더는 GPU에서 정점과 픽셀을 계산하고, 소리는 Audio Engine 또는 DSP가 시간에 따른 샘플을 계산한다.
+
+```text
+그래픽
+공간의 Vertex/Pixel
+→ GPU Shader
+→ 화면
+
+오디오
+시간에 따른 Sample
+→ Audio Engine / DSP
+→ 스피커와 헤드폰
+```
+
+공포 게임에서 필요한 3D 소리에는 다음 개념이 연결된다.
+
+- 거리 감쇠: 멀어질수록 볼륨 감소
+- 좌우 방향: 카메라 Right와 소리 방향의 내적으로 패닝 결정
+- 앞뒤/위아래 구분: HRTF 같은 공간 음향 처리
+- 벽 가림: Raycast 후 볼륨 감소와 Low-pass filter 적용
+- 공간감: Reverb와 방 크기 설정
+
+따라서 렌더링 Shader와 오디오를 별도의 시스템으로 두되, 플레이어와 소리 발생원의 Transform은 World에서 함께 공유한다.
+
+---
+
+### 13. 현재 완료 상태와 바로 다음 과제
+
+현재까지 완성된 기반은 다음과 같다.
+
+```text
+WinMain
+→ GameLoop
+   ├─ Window
+   ├─ Timer
+   ├─ Graphics
+   └─ LightSaverGame
+      ├─ Camera
+      ├─ Shader
+      ├─ Mesh
+      ├─ ObjectBuffer
+      └─ CameraBuffer
+```
+
+현재 출력 결과는 WASD와 마우스로 카메라를 움직이며 회전하는 색상 큐브다. 렌더링 데이터 측면에서는 Shader와 Mesh의 첫 분리가 끝났다.
+
+바로 다음 과제는 모델 로더가 아니라 하드코딩된 큐브에 텍스처를 붙이는 것이다.
+
+```text
+1. Vertex에 UV 추가
+2. InputLayout에 TEXCOORD 추가
+3. HLSL VS 입력/출력에 UV 연결
+4. Texture2D와 ShaderResourceView 생성
+5. SamplerState 생성
+6. Pixel Shader에서 Texture.Sample
+7. 큐브의 24개 정점과 면별 UV 구성
+```
+
+큐브를 위치 정점 8개로 만들면 위치는 공유할 수 있지만 각 면이 서로 다른 UV와 Normal을 갖기 어렵다. 텍스처와 조명을 위한 일반적인 큐브는 면마다 네 정점을 두어 24개 정점으로 구성한다.
+
+그 다음 확장 순서는 다음과 같다.
+
+```text
+Texture
+→ Material
+→ ModelLoader
+→ ResourceManager
+→ World / Actor / Component
+→ Renderer
+→ 맵과 충돌
+→ 손전등
+→ 몬스터 두 마리
+→ 발전기와 출구
+→ 안개, 3D 오디오, 레이더
+```
+
+이번 분리의 핵심은 클래스를 많이 만드는 것이 아니라, 앞으로 실제 게임 요소가 늘어나도 같은 Mesh와 Shader를 재사용하고 조합할 수 있는 첫 경계를 세운 것이다.

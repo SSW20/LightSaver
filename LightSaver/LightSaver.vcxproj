@@ -130,6 +130,8 @@
     <ClCompile Include="Graphics.cpp" />
     <ClCompile Include="LightSaverGame.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="Mesh.cpp" />
+    <ClCompile Include="Shader.cpp" />
     <ClCompile Include="Timer.cpp" />
     <ClCompile Include="Windows.cpp" />
   </ItemGroup>
@@ -143,6 +145,8 @@
     <ClInclude Include="GameLoop.h" />
     <ClInclude Include="Graphics.h" />
     <ClInclude Include="LightSaverGame.h" />
+    <ClInclude Include="Mesh.h" />
+    <ClInclude Include="Shader.h" />
     <ClInclude Include="Timer.h" />
     <ClInclude Include="Windows.h" />
   </ItemGroup>

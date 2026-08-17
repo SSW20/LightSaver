@@ -1,4 +1,5 @@
 #include "LightSaverGame.h"
+#include "Shader.h"
 #include <cmath>
 bool LightSaverGame::OnInitialize()
 {
@@ -14,19 +15,6 @@ bool LightSaverGame::OnInitialize()
 		{  0.5f,  0.5f,  0.5f }, // 6
 		{ -0.5f,  0.5f,  0.5f }  // 7
 	};
-	D3D11_BUFFER_DESC VertexDesc = {};
-	D3D11_SUBRESOURCE_DATA VertexData = {};
-
-	VertexDesc.ByteWidth = sizeof(vertices);
-	VertexDesc.Usage = D3D11_USAGE_IMMUTABLE;
-	VertexDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-
-	VertexData.pSysMem = vertices;
-
-	HRESULT result;
-
-	result = GetGraphics().Device->CreateBuffer(&VertexDesc, &VertexData, &VertexBuffer);
-	if (FAILED(result)) return false;
 
 	UINT indices[] =
 	{
@@ -54,41 +42,19 @@ bool LightSaverGame::OnInitialize()
 		4, 7, 6,
 		4, 6, 5
 	};
+	HRESULT result;
+
+	if (!MeshSet.Initialize(GetGraphics().Device, vertices, 8, indices, 36))
+	{
+		return false;
+	}
 
 
-	D3D11_BUFFER_DESC IndexDesc = {};
-	IndexDesc.ByteWidth = sizeof(indices);
-	IndexDesc.Usage = D3D11_USAGE_DEFAULT;
-	IndexDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
 
-	D3D11_SUBRESOURCE_DATA IndexData = {};
-	IndexData.pSysMem = indices;
-
-	result = GetGraphics().Device->CreateBuffer(&IndexDesc, &IndexData, &IndexBuffer);
-	if (FAILED(result)) return false;
-
-	ID3DBlob* VSBlob = nullptr;
-	ID3DBlob* PSBlob = nullptr;
-	ID3DBlob* ErrBlob = nullptr;
-
-	result = D3DCompileFromFile(L"shader.hlsl", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "VS_Main", "vs_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &VSBlob, &ErrBlob);
-	if (FAILED(result)) return false;
-	result = D3DCompileFromFile(L"shader.hlsl", nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE, "PS_Main", "ps_5_0", D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION, 0, &PSBlob, &ErrBlob);
-	if (FAILED(result)) return false;
-
-	result = GetGraphics().Device->CreateVertexShader(VSBlob->GetBufferPointer(), VSBlob->GetBufferSize(), nullptr, &VS);
-	if (FAILED(result)) return false;
-	result = GetGraphics().Device->CreatePixelShader(PSBlob->GetBufferPointer(), PSBlob->GetBufferSize(), nullptr, &PS);
-	if (FAILED(result)) return false;
-
-	D3D11_INPUT_ELEMENT_DESC layout[] = { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 };
-	result = GetGraphics().Device->CreateInputLayout(layout, 1, VSBlob->GetBufferPointer(), VSBlob->GetBufferSize(), &InputLayout);
-
-	if (FAILED(result)) return false;
-
-	VSBlob->Release();
-	PSBlob->Release();
-
+	if (!ShaderSet.Initialize(GetGraphics().Device, L"shader.hlsl"))
+	{
+		return false;
+	}
 	ViewPort.TopLeftX = 0.f;
 	ViewPort.TopLeftY = 0.f;
 	ViewPort.Height = 720.f;
@@ -195,21 +161,16 @@ bool LightSaverGame::Render()
 	GetGraphics().DeviceContext->OMSetRenderTargets(1, &GetGraphics().RTV, GetGraphics().DSV);
 	GetGraphics().DeviceContext->ClearRenderTargetView(GetGraphics().RTV, clearColor);
 	GetGraphics().DeviceContext->ClearDepthStencilView(GetGraphics().DSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
-
 	GetGraphics().DeviceContext->RSSetViewports(1, &ViewPort);
 
-
-	GetGraphics().DeviceContext->IASetInputLayout(InputLayout);
-	GetGraphics().DeviceContext->IASetVertexBuffers(0, 1, &VertexBuffer, &Stride, &Offset);
 	ID3D11Buffer* ConstantBuffers[] = { CameraBuffer,ObjectBuffer };
 	GetGraphics().DeviceContext->VSSetConstantBuffers(0, 2, ConstantBuffers);
-	GetGraphics().DeviceContext->IASetIndexBuffer(IndexBuffer, DXGI_FORMAT_R32_UINT, 0);
 	GetGraphics().DeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-	GetGraphics().DeviceContext->VSSetShader(VS, nullptr, 0);
-	GetGraphics().DeviceContext->PSSetShader(PS, nullptr, 0);
+	ShaderSet.Bind(GetGraphics().DeviceContext);
+	MeshSet.Bind(GetGraphics().DeviceContext);
 
-	GetGraphics().DeviceContext->DrawIndexed(36, 0, 0);
+	GetGraphics().DeviceContext->DrawIndexed(MeshSet.GetIndexCount(), 0, 0);
     return true;
 }
 
@@ -217,9 +178,4 @@ LightSaverGame::~LightSaverGame()
 {
 	if (ObjectBuffer != nullptr) ObjectBuffer->Release();
 	if (CameraBuffer != nullptr) CameraBuffer->Release();
-	if (IndexBuffer != nullptr) IndexBuffer->Release();
-	if (VertexBuffer != nullptr) VertexBuffer->Release();
-	if (InputLayout != nullptr) InputLayout->Release();
-	if (PS != nullptr) PS->Release();
-	if (VS != nullptr) VS->Release();
 }

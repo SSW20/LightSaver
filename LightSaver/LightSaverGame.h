@@ -3,13 +3,10 @@
 #include <dxgi.h>
 #include <DirectXMath.h>
 #include "Camera.h"
+#include "Shader.h"
+#include "Mesh.h"
 
-struct Vertex
-{
-	float x;
-	float y;
-	float z;
-};
+class Shader;
 
 struct alignas(16) CameraBufferData
 {
@@ -35,14 +32,8 @@ public:
 	~LightSaverGame() override;
 
 private:
-	ID3D11Buffer* VertexBuffer = nullptr;
-	ID3D11Buffer* IndexBuffer = nullptr;
-	ID3D11VertexShader* VS = nullptr;
-	ID3D11PixelShader* PS = nullptr;
-	ID3D11InputLayout* InputLayout = nullptr;
+
 	D3D11_VIEWPORT ViewPort = {};
-	UINT Stride = sizeof(Vertex);
-	UINT Offset = 0;
 	ID3D11Buffer* CameraBuffer = nullptr;
 	ID3D11Buffer* ObjectBuffer = nullptr;
 	float Rotation = 0.0f;
@@ -51,4 +42,6 @@ private:
 	float CameraSpeed = 3.0f;
 	// 픽셀당 회전할 라디안 값
 	float MouseSpeed = DirectX::XMConvertToRadians(0.1f);
+	Shader ShaderSet;
+	Mesh MeshSet;
 };
