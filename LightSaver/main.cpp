@@ -19,12 +19,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	//									Windows API는 프로그램이 운영체제의 창과 메시지 기능을 사용하기 위한 함수 인터페이스
 	//									프로그래머는 WinodwAPI를 통해 커스텀하여 코드를 작성
 
-
+	HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	if (FAILED(result))
+	{
+		return 0;
+	}
 
 	LightSaverGame LightSaver;
-	if (!LightSaver.Initialize(hInstance, hPrevInstance, lpCmdLine, nCmdShow)) return 0;
+	int exitCode = 0;
+	if (LightSaver.Initialize(hInstance, hPrevInstance, lpCmdLine, nCmdShow))
+	{
+		exitCode = LightSaver.Run();
+	}
 
-	return LightSaver.Run();
+	CoUninitialize();
+
+	return exitCode;
 #if 0
 	Windows window;
 	if (!window.Initialize(hInstance, hPrevInstance, lpCmdLine, nCmdShow)) return 0;

@@ -4140,3 +4140,735 @@ Texture
 ```
 
 이번 분리의 핵심은 클래스를 많이 만드는 것이 아니라, 앞으로 실제 게임 요소가 늘어나도 같은 Mesh와 Shader를 재사용하고 조합할 수 있는 첫 경계를 세운 것이다.
+
+---
+
+## 2026-08-18 — UV 좌표, WIC 텍스처 로딩, SRV와 Sampler
+
+### 오늘의 목표와 결과
+
+오늘의 목표는 단색으로 출력하던 큐브에 이미지 텍스처를 입히고, 이미지 파일이 Pixel Shader의 최종 색상이 되기까지의 전체 경로를 직접 구현하는 것이었다.
+
+구현한 항목은 다음과 같다.
+
+1. `Vertex`에 2차원 UV 좌표 추가
+2. 큐브를 위치 정점 8개가 아니라 면별 정점 24개로 재구성
+3. `AddFace`를 사용하여 각 면의 정점과 인덱스를 생성
+4. Input Layout에 `TEXCOORD` 요소 추가
+5. Vertex Shader에서 UV를 Pixel Shader로 전달
+6. WinMain의 메인 스레드를 COM에 등록
+7. WIC로 JPEG 파일을 열고 RGBA 픽셀 배열로 변환
+8. CPU 픽셀 배열로 `ID3D11Texture2D` 생성
+9. Texture2D를 Shader에서 읽기 위한 SRV 생성
+10. 텍스처 주소 지정과 필터링 규칙을 가진 Sampler State 생성
+11. SRV를 Pixel Shader의 `t0`, Sampler를 `s0` 슬롯에 연결
+12. HLSL의 `Texture2D.Sample`로 큐브 표면의 최종 색상 출력
+
+최종 데이터 흐름은 다음과 같다.
+
+```text
+Test.jpg
+→ WIC Decoder
+→ 첫 번째 Image Frame
+→ Format Converter(RGBA 32비트)
+→ CPU의 연속된 PixelData 배열
+→ ID3D11Texture2D
+→ ID3D11ShaderResourceView
+→ PSSetShaderResources(t0)
+→ Texture2D DiffuseTexture : register(t0)
+→ Texture.Sample(Sampler, UV)
+→ Pixel Shader의 SV_TARGET
+→ Render Target / Back Buffer
+→ 화면
+```
+
+---
+
+### 1. UV 좌표는 모델 표면과 이미지 위치를 연결한다
+
+위치 좌표는 정점이 3차원 공간의 어디에 있는지 나타내고, UV 좌표는 그 정점에 이미지의 어느 위치를 붙일지 나타낸다.
+
+```cpp
+struct Vertex
+{
+    float x, y, z;
+    float u, v;
+};
+```
+
+현재 정점 하나의 메모리 배치는 다음과 같다.
+
+```text
+0 byte                                      20 byte
+├──── x ────┼──── y ────┼──── z ────┼──── u ────┼──── v ────┤
+    4           4           4           4           4 bytes
+
+Position = 처음 12바이트
+UV       = 그 다음 8바이트
+Stride   = sizeof(Vertex) = 20바이트
+```
+
+일반적으로 UV의 범위는 다음과 같다.
+
+```text
+(0, 0) ---------------- (1, 0)
+  |                        |
+  |       이미지           |
+  |                        |
+(0, 1) ---------------- (1, 1)
+```
+
+UV는 화면 좌표가 아니다. 화면의 중앙이 `(0, 0)`인 NDC 좌표와도 다르다. UV는 모델 표면에서 텍스처 이미지를 조회하기 위한 독립적인 2차원 좌표다.
+
+현재 큐브 한 면에는 다음 UV를 사용한다.
+
+```cpp
+vertices.push_back({ v0.x, v0.y, v0.z, 0.0f, 1.0f });
+vertices.push_back({ v1.x, v1.y, v1.z, 0.0f, 0.0f });
+vertices.push_back({ v2.x, v2.y, v2.z, 1.0f, 0.0f });
+vertices.push_back({ v3.x, v3.y, v3.z, 1.0f, 1.0f });
+```
+
+이 네 정점은 이미지의 네 모서리를 큐브 한 면의 네 모서리에 대응시킨다.
+
+---
+
+### 2. 텍스처 큐브가 8개가 아니라 24개 정점을 사용하는 이유
+
+위치만 생각하면 큐브에는 서로 다른 모서리가 8개뿐이다. 그러나 렌더링 정점은 위치만으로 같은 정점인지 결정되지 않는다.
+
+```text
+렌더링 정점
+= Position
++ UV
++ Normal
++ 이후 추가될 Tangent, Color 등의 속성
+```
+
+큐브 모서리 하나는 세 면이 공유한다. 같은 3차원 위치라도 각 면에서는 서로 다른 UV와 Normal이 필요하다.
+
+예를 들어 한 모서리의 위치가 같더라도 다음처럼 의미가 달라질 수 있다.
+
+```text
+앞면에서의 정점: Position A, UV (0, 0), Normal (0, 0, -1)
+왼쪽 면의 정점: Position A, UV (1, 0), Normal (-1, 0, 0)
+위쪽 면의 정점: Position A, UV (0, 1), Normal (0, 1, 0)
+```
+
+따라서 면마다 정점 네 개를 독립적으로 만들어야 한다.
+
+```text
+6 faces × 4 vertices = 24 vertices
+6 faces × 2 triangles × 3 indices = 36 indices
+```
+
+`AddFace`는 네 위치를 받아 정점 네 개와 삼각형 두 개를 생성한다.
+
+```text
+v0 ---- v1
+|     /  |
+|   /    |
+v3 ---- v2
+
+Triangle 1: 0, 1, 2
+Triangle 2: 0, 2, 3
+```
+
+각 면을 호출할 때 넘기는 위치 순서가 컬링 방향을 결정하고, `AddFace` 내부의 UV 순서가 텍스처의 방향을 결정한다.
+
+---
+
+### 3. Input Layout과 HLSL Semantic 연결
+
+CPU의 `Vertex`에 UV를 추가했으므로 GPU가 새 메모리 배치를 읽는 방법도 알려 줘야 한다.
+
+```cpp
+D3D11_INPUT_ELEMENT_DESC layout[] =
+{
+    {
+        "POSITION", 0,
+        DXGI_FORMAT_R32G32B32_FLOAT,
+        0, 0,
+        D3D11_INPUT_PER_VERTEX_DATA, 0
+    },
+    {
+        "TEXCOORD", 0,
+        DXGI_FORMAT_R32G32_FLOAT,
+        0, 12,
+        D3D11_INPUT_PER_VERTEX_DATA, 0
+    }
+};
+```
+
+- POSITION은 `float` 세 개이므로 `R32G32B32_FLOAT`다.
+- TEXCOORD는 `float` 두 개이므로 `R32G32_FLOAT`다.
+- TEXCOORD의 시작 오프셋은 Position 12바이트 다음인 12다.
+
+HLSL 입력 구조의 Semantic이 같은 이름으로 연결된다.
+
+```hlsl
+struct VS_INPUT
+{
+    float3 position : POSITION;
+    float2 texcoord : TEXCOORD;
+};
+```
+
+변수 이름 `position`, `texcoord` 자체보다 `POSITION`, `TEXCOORD` Semantic이 파이프라인 연결에서 중요하다.
+
+---
+
+### 4. UV는 Vertex Shader에서 Pixel Shader로 어떻게 전달되는가
+
+Vertex Shader는 입력받은 UV를 출력 구조체에 넣는다.
+
+```hlsl
+output.texcoord = input.texcoord;
+```
+
+하지만 Pixel Shader는 정점에서만 실행되는 것이 아니다. Rasterizer가 삼각형 내부를 픽셀 조각으로 만들면서 세 정점의 UV를 보간한다.
+
+```text
+삼각형 세 정점의 UV
+→ Vertex Shader 출력
+→ Rasterizer
+→ 삼각형 내부 위치에 맞춰 UV 보간
+→ 픽셀마다 서로 다른 PS_INPUT.texcoord 생성
+→ Pixel Shader에서 텍스처 조회
+```
+
+예를 들어 한쪽 정점의 U가 0이고 반대쪽 정점의 U가 1이라면, 그 사이 픽셀에는 0.1, 0.2, 0.3 같은 중간 U가 자동으로 만들어진다. 그래서 네 모서리의 UV만 지정해도 이미지 전체가 면 위에 연속적으로 펼쳐진다.
+
+---
+
+### 5. COM 초기화와 WIC
+
+WIC는 Windows Imaging Component이며 COM 기반 API다. 따라서 WIC 객체를 생성하기 전에 현재 스레드가 COM을 사용할 것이라고 등록해야 한다.
+
+```cpp
+HRESULT result = CoInitializeEx(
+    nullptr,
+    COINIT_MULTITHREADED);
+```
+
+`CoInitializeEx`는 새 작업 스레드를 생성하는 함수가 아니다. 현재 호출한 스레드의 COM 동작 모델을 초기화하는 함수다.
+
+- `S_OK`: 현재 스레드에서 COM이 처음 초기화됨
+- `S_FALSE`: 이미 같은 방식으로 초기화되어 있음. 이것도 성공이다.
+- `RPC_E_CHANGED_MODE`: 같은 스레드가 이미 다른 COM 동작 모델로 초기화됨
+
+따라서 단순히 `result != S_OK`가 아니라 `FAILED(result)`로 실패를 검사해야 한다.
+
+```cpp
+if (FAILED(result))
+{
+    return 0;
+}
+```
+
+성공한 `CoInitializeEx` 호출에는 대응하는 `CoUninitialize`가 필요하다.
+
+```text
+CoInitializeEx
+→ COM/WIC 객체 사용
+→ COM 객체 모두 파괴
+→ CoUninitialize
+```
+
+현재 학습 코드에서는 이 수명 순서를 더 명확하게 만들기 위해 `LightSaverGame`의 생존 범위를 별도 블록으로 제한하는 개선을 이후 적용할 수 있다.
+
+---
+
+### 6. WIC 객체들의 역할
+
+수동 WIC 로더의 핵심 객체는 네 개다.
+
+#### 6.1 IWICImagingFactory
+
+```cpp
+CoCreateInstance(
+    CLSID_WICImagingFactory,
+    nullptr,
+    CLSCTX_INPROC_SERVER,
+    IID_PPV_ARGS(&ImageFactory));
+```
+
+WIC Decoder와 Format Converter 같은 객체를 생성하는 공장이다. 이미지 데이터 자체는 아니다.
+
+#### 6.2 IWICBitmapDecoder
+
+```cpp
+ImageFactory->CreateDecoderFromFilename(
+    FilePath,
+    nullptr,
+    GENERIC_READ,
+    WICDecodeMetadataCacheOnDemand,
+    &Decoder);
+```
+
+JPEG, PNG 같은 파일 컨테이너를 열고 파일 형식을 해석한다. `WICDecodeMetadataCacheOnDemand`는 필요한 시점에 메타데이터를 읽도록 한다.
+
+#### 6.3 IWICBitmapFrameDecode
+
+```cpp
+Decoder->GetFrame(0, &Frame);
+```
+
+파일 안에서 실제 이미지 프레임 한 장을 선택한다. 일반적인 JPEG나 PNG는 한 프레임이지만 GIF나 다중 프레임 이미지 형식은 여러 프레임을 가질 수 있다.
+
+#### 6.4 IWICFormatConverter
+
+```cpp
+Converter->Initialize(
+    Frame,
+    GUID_WICPixelFormat32bppRGBA,
+    WICBitmapDitherTypeNone,
+    nullptr,
+    0.0f,
+    WICBitmapPaletteTypeCustom);
+```
+
+입력 이미지가 RGB, BGR, 팔레트 형식 등 무엇이든 GPU로 넘기기 쉬운 32비트 RGBA 형식으로 통일한다.
+
+```text
+한 픽셀 = R 1바이트 + G 1바이트 + B 1바이트 + A 1바이트
+        = 총 4바이트
+```
+
+Format Converter의 설정만으로 CPU 배열이 생기는 것은 아니다. 실제 디코딩·변환 결과를 메모리에 복사하는 호출이 `CopyPixels`다.
+
+---
+
+### 7. CopyPixels와 2차원 이미지의 메모리 배치
+
+이미지는 가로와 세로를 가진 2차원 자료지만, 메모리에서는 연속된 1차원 바이트 배열로 저장한다.
+
+```cpp
+const UINT BytesPerPixel = 4;
+const UINT Stride = Width * BytesPerPixel;
+const UINT Size = Stride * Height;
+
+std::vector<unsigned char> PixelData(Size);
+```
+
+여기서 코드의 `Stride`는 한 이미지 행이 차지하는 바이트 수다. Direct3D에서는 같은 의미로 `RowPitch`라는 이름을 많이 사용한다.
+
+```text
+RowPitch = Width × 4 bytes
+TotalSize = RowPitch × Height
+```
+
+가로 3픽셀, 세로 2픽셀이라면 다음과 같다.
+
+```text
+2차원 이미지
+[P00][P01][P02]
+[P10][P11][P12]
+
+메모리
+[P00 RGBA][P01 RGBA][P02 RGBA][P10 RGBA][P11 RGBA][P12 RGBA]
+```
+
+실제 픽셀 복사는 다음 호출에서 일어난다.
+
+```cpp
+Converter->CopyPixels(
+    nullptr,
+    Stride,
+    Size,
+    PixelData.data());
+```
+
+- 첫 번째 `nullptr`: 이미지 전체 영역 복사
+- `Stride`: 목적지 한 행의 바이트 간격
+- `Size`: 목적지 배열 전체 크기
+- `PixelData.data()`: 실제 바이트를 받을 CPU 메모리 주소
+
+이 단계가 끝나도 데이터는 아직 CPU 메모리에 있다. GPU가 Shader에서 읽으려면 Direct3D Texture Resource로 다시 생성해야 한다.
+
+---
+
+### 8. ID3D11Texture2D 생성
+
+Texture2D의 모양과 용도는 `D3D11_TEXTURE2D_DESC`로 설명한다.
+
+```cpp
+D3D11_TEXTURE2D_DESC TextureDesc = {};
+TextureDesc.Width = Width;
+TextureDesc.Height = Height;
+TextureDesc.MipLevels = 1;
+TextureDesc.ArraySize = 1;
+TextureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+TextureDesc.SampleDesc.Count = 1;
+TextureDesc.SampleDesc.Quality = 0;
+TextureDesc.Usage = D3D11_USAGE_IMMUTABLE;
+TextureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+```
+
+#### Format
+
+WIC Converter의 `GUID_WICPixelFormat32bppRGBA`와 Direct3D의 `DXGI_FORMAT_R8G8B8A8_UNORM`을 일치시켰다.
+
+`UNORM`은 각 8비트 채널의 정수 범위 0~255를 Shader에서 0.0~1.0 범위로 정규화해서 읽는다는 의미다.
+
+#### Usage
+
+이미지 파일에서 한 번 로드한 뒤 실행 중 내용을 바꾸지 않으므로 `D3D11_USAGE_IMMUTABLE`을 사용한다. Immutable Resource는 생성할 때 반드시 초기 데이터를 함께 제공해야 한다.
+
+#### BindFlags
+
+```cpp
+D3D11_BIND_SHADER_RESOURCE
+```
+
+이 Texture2D를 Shader에서 읽을 리소스로 사용할 것이라고 지정한다.
+
+#### SampleDesc.Count와 Quality
+
+```cpp
+TextureDesc.SampleDesc.Count = 1;
+TextureDesc.SampleDesc.Quality = 0;
+```
+
+이 `Quality`는 JPEG 화질, 해상도 또는 텍스처 필터 품질이 아니다. `SampleDesc`는 MSAA의 픽셀당 샘플 수와 장치가 지원하는 샘플 배치 패턴을 지정한다.
+
+- `Count = 1`: 픽셀당 샘플 하나, 즉 MSAA를 사용하지 않음
+- `Quality = 0`: 기본 샘플 패턴
+
+MSAA를 사용할 때도 Quality 숫자가 클수록 무조건 화질이 좋다는 뜻은 아니다. 지원 가능한 패턴 수는 `CheckMultisampleQualityLevels`로 조회해야 한다. 일반적인 Shader Resource용 이미지 텍스처는 `Count = 1`, `Quality = 0`을 사용한다.
+
+---
+
+### 9. D3D11_SUBRESOURCE_DATA는 CPU 초기 데이터의 설명서다
+
+```cpp
+D3D11_SUBRESOURCE_DATA InitialData = {};
+InitialData.pSysMem = PixelData.data();
+InitialData.SysMemPitch = Stride;
+InitialData.SysMemSlicePitch = 0;
+```
+
+- `pSysMem`: CPU 픽셀 배열의 시작 주소
+- `SysMemPitch`: CPU 배열에서 다음 행으로 이동할 바이트 수
+- `SysMemSlicePitch`: 3D Texture의 다음 깊이 Slice 간격. 현재 2D Texture이므로 0
+
+```cpp
+Device->CreateTexture2D(
+    &TextureDesc,
+    &InitialData,
+    &Image);
+```
+
+이 호출이 CPU의 PixelData를 이용하여 GPU가 사용할 Texture2D Resource를 만든다. 생성이 끝난 뒤 CPU의 `std::vector`가 파괴되어도 GPU Texture는 독립적으로 존재한다.
+
+---
+
+### 10. SRV가 필요한 이유
+
+Texture2D는 실제 픽셀을 가진 Resource다. 그러나 Shader Pipeline에는 Resource 자체를 바로 연결하지 않고, 어떤 방식으로 읽을지 나타내는 View를 연결한다.
+
+```cpp
+Device->CreateShaderResourceView(
+    Image,
+    nullptr,
+    &SRV);
+```
+
+```text
+ID3D11Texture2D
+→ 실제 GPU 이미지 메모리
+
+ID3D11ShaderResourceView
+→ 이 리소스를 Shader가 읽도록 해석하는 View
+```
+
+하나의 Resource는 용도와 생성 Flag가 허용한다면 서로 다른 View를 가질 수 있다. View는 전체 Resource 또는 일부 Mip/Array 범위와 읽을 Format을 지정할 수 있다.
+
+SRV가 생성되면 내부적으로 원본 Resource에 대한 COM 참조를 유지한다. 따라서 SRV 생성이 성공한 뒤 지역 변수로 받은 `ID3D11Texture2D* Image`는 `Release`할 수 있다. 이 Release는 GPU Texture를 즉시 파괴한다는 뜻이 아니라, 지역 포인터가 가진 참조 하나를 반환한다는 뜻이다. SRV가 살아 있는 동안 원본 Resource도 살아 있다.
+
+---
+
+### 11. Sampler State는 텍스처를 읽는 규칙이다
+
+SRV는 어떤 리소스를 읽을지 지정하고, Sampler는 UV로 그 리소스를 어떻게 읽을지 지정한다.
+
+```cpp
+D3D11_SAMPLER_DESC SamplerDesc = {};
+SamplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+SamplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+SamplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+SamplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+SamplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+SamplerDesc.MinLOD = 0.0f;
+SamplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+```
+
+#### MIN, MAG, MIP
+
+- MIN: Texture가 화면에서 작게 보일 때 여러 Texel을 어떻게 줄일지 결정
+- MAG: Texture가 화면에서 크게 보일 때 Texel 사이를 어떻게 확대할지 결정
+- MIP: 서로 다른 Mipmap Level 사이를 어떻게 선택·보간할지 결정
+- LINEAR: 주변 값을 선형 보간하여 부드러운 결과 생성
+
+현재 Texture는 Mip Level이 하나뿐이므로 MIP 보간 효과는 없지만, MIN/MAG 선형 보간은 사용된다.
+
+#### AddressU/V/W
+
+UV가 0~1 범위를 벗어날 때의 처리 방식이다.
+
+```text
+WRAP일 때
+U = 0.2 → 0.2 위치
+U = 1.2 → 다시 0.2 위치
+U = 2.2 → 다시 0.2 위치
+```
+
+그래서 바닥이나 벽에 같은 텍스처를 반복할 수 있다. 2D Texture에서는 U와 V가 실제 가로·세로 방향이며 W는 3D Texture의 깊이 방향이라 현재는 실질적으로 사용하지 않는다.
+
+#### LOD 범위
+
+`MinLOD`와 `MaxLOD`는 사용할 수 있는 Mipmap Level 범위를 제한한다. 현재는 전체 범위를 허용하지만 Texture가 한 Level만 가지므로 0단계만 사용된다.
+
+---
+
+### 12. C++ 슬롯과 HLSL register 연결
+
+Texture의 `Bind`는 SRV와 Sampler를 Pixel Shader의 슬롯에 연결한다.
+
+```cpp
+DeviceContext->PSSetShaderResources(0, 1, &SRV);
+DeviceContext->PSSetSamplers(0, 1, &Sampler);
+```
+
+각 인수의 의미는 다음과 같다.
+
+```text
+0     → 0번 슬롯부터
+1     → 객체 한 개
+&SRV  → 연결할 SRV 포인터 배열의 시작 주소
+```
+
+HLSL에서는 같은 번호의 register로 받는다.
+
+```hlsl
+Texture2D DiffuseTexture : register(t0);
+SamplerState DiffuseSampler : register(s0);
+```
+
+```text
+C++ PSSetShaderResources(0, ...) ↔ HLSL register(t0)
+C++ PSSetSamplers(0, ...)        ↔ HLSL register(s0)
+```
+
+`Texture2D` 변수는 이미지 전체를 HLSL 안에 복사한 변수가 아니다. C++에서 `t0`에 연결한 GPU Resource를 Shader가 참조하기 위한 핸들에 가깝다.
+
+---
+
+### 13. Texture.Sample의 의미
+
+Pixel Shader는 보간된 UV를 이용하여 텍스처 색상을 조회한다.
+
+```hlsl
+float4 PS_Main(PS_INPUT input) : SV_TARGET
+{
+    return DiffuseTexture.Sample(
+        DiffuseSampler,
+        input.texcoord);
+}
+```
+
+세 요소의 역할은 다음과 같다.
+
+```text
+DiffuseTexture → 어떤 이미지에서 읽을 것인가
+DiffuseSampler → 어떤 필터와 주소 규칙으로 읽을 것인가
+input.texcoord → 이미지의 어느 위치를 읽을 것인가
+```
+
+`Sample`의 반환값은 RGBA를 나타내는 `float4`다.
+
+```text
+float4(R, G, B, A)
+각 채널 범위는 UNORM Texture에서 0.0 ~ 1.0
+```
+
+이 값을 `SV_TARGET`으로 반환하면 Output Merger가 현재 Render Target에 해당 픽셀 색상을 기록한다.
+
+---
+
+### 14. 이번 단계의 Draw 직전 상태
+
+현재 렌더링 코드는 다음 순서로 필요한 상태를 DeviceContext에 연결한다.
+
+```cpp
+ShaderSet.Bind(GetGraphics().DeviceContext);
+MeshSet.Bind(GetGraphics().DeviceContext);
+TextureSet.Bind(GetGraphics().DeviceContext);
+
+GetGraphics().DeviceContext->DrawIndexed(
+    MeshSet.GetIndexCount(),
+    0,
+    0);
+```
+
+```text
+Shader Bind
+→ InputLayout, Vertex Shader, Pixel Shader 선택
+
+Mesh Bind
+→ VertexBuffer, IndexBuffer 선택
+
+Texture Bind
+→ Pixel Shader t0와 s0 선택
+
+DrawIndexed
+→ 지금까지 DeviceContext에 설정한 상태를 사용하여 렌더링
+```
+
+Direct3D 11의 DeviceContext는 현재 상태를 보관하는 상태 머신이므로, 객체 생성과 현재 Draw에 사용할 객체를 Bind하는 것은 서로 다른 작업이다.
+
+---
+
+### 15. 발생했던 C1071 주석 오류와 UTF-8
+
+`Texture.cpp`의 블록 주석 끝에 한글과 `*/`가 같은 줄에 있을 때 다음 오류가 발생했다.
+
+```text
+error C1071: 주석에서 예기치 않은 파일의 끝이 나타났습니다.
+```
+
+파일은 UTF-8로 저장되어 있었지만 컴파일러가 시스템 코드 페이지 949로 해석하면서 한글의 UTF-8 바이트와 뒤의 `*/`를 잘못 해석한 것이 원인이었다.
+
+즉시 적용한 해결 방법은 주석 종료 기호를 별도 줄로 옮기는 것이었다.
+
+```cpp
+IWICFormatConverter
+→ RGBA 형식으로 변환
+*/
+```
+
+근본적인 해결은 컴파일러가 소스 파일을 UTF-8로 해석하도록 프로젝트에 `/utf-8` 옵션을 지정하거나 파일을 UTF-8 BOM 형식으로 저장하는 것이다. 여러 소스에서 나타난 `C4819` 경고도 같은 인코딩 문제와 관련된다.
+
+---
+
+### 16. 현재 구현에서 남은 개선점
+
+현재 코드는 수동 WIC 흐름을 이해하고 텍스처를 화면에 출력하는 학습 목표를 달성했다. 다만 실제 엔진 코드로 확장하기 전에 다음을 개선해야 한다.
+
+#### 모든 HRESULT 검사
+
+다음 생성 함수의 반환값을 `result`에 저장하고 실패를 확인해야 한다.
+
+```text
+CreateFormatConverter
+CreateTexture2D
+CreateShaderResourceView
+CreateSamplerState
+```
+
+현재처럼 생성 실패를 확인하지 않으면 null pointer를 다음 함수에 전달하여 접근 위반이 발생할 수 있고, 정확히 어느 단계가 실패했는지도 알기 어렵다.
+
+#### 모든 성공·실패 경로에서 Release
+
+지역 WIC 객체와 임시 Texture2D는 사용이 끝나면 해제해야 한다.
+
+```text
+Image(Texture2D 지역 포인터)
+Converter
+Frame
+Decoder
+ImageFactory
+```
+
+성공 경로만이 아니라 중간 함수가 실패하여 `return false`하는 경로에서도 이미 만들어진 객체를 정리해야 한다. 이후 `Microsoft::WRL::ComPtr` 또는 공통 Cleanup 경로를 사용하면 이 문제를 줄일 수 있다.
+
+#### Initialize 반환값 사용
+
+게임은 Texture 초기화 실패 시 렌더링을 계속하지 않아야 한다.
+
+```cpp
+if (!TextureSet.Initialize(
+    GetGraphics().Device,
+    L"Test.jpg"))
+{
+    return false;
+}
+```
+
+#### 파일 경로
+
+현재 `Test.jpg`는 실행 파일의 Working Directory에 의존하는 상대 경로다. 개발 환경과 배포 환경이 달라져도 동작하게 하려면 Asset Root를 기준으로 경로를 조합하거나 빌드 시 출력 폴더로 에셋을 복사하는 규칙이 필요하다.
+
+#### Mipmap
+
+현재 `MipLevels = 1`이므로 멀리 있는 Texture가 작게 보일 때 사용할 축소 이미지가 없다. 이후 DirectXTK의 WICTextureLoader 또는 DirectXTex/texconv를 이용해 Mipmap이 포함된 DDS를 준비할 수 있다.
+
+#### 클래스 책임
+
+현재 `Texture`는 파일 디코딩, GPU Resource 생성, Sampler 생성, Shader Bind를 모두 담당한다. 학습 단계에서는 흐름을 한곳에서 보기 좋지만 확장 단계에서는 다음처럼 나눌 수 있다.
+
+```text
+TextureLoader → 파일 해석과 CPU 픽셀 또는 GPU Texture 생성
+Texture       → SRV 등 GPU Texture Resource 소유
+SamplerState  → 필터/주소 규칙 소유 또는 공용 캐시
+Material      → Shader + Texture + Sampler 조합
+```
+
+---
+
+### 17. 편의 라이브러리와 직접 구현의 관계
+
+OpenGL 프로젝트에서 사용했던 `stb_image`와 WIC는 모두 이미지 파일을 픽셀 배열로 디코딩하는 역할을 한다. `stb_image`가 OpenGL 전용인 것은 아니며, WIC도 Direct3D 전용은 아니다.
+
+```text
+stb_image 또는 WIC
+→ 파일을 CPU 픽셀로 변환
+
+OpenGL glTexImage2D 또는 Direct3D CreateTexture2D
+→ CPU 픽셀을 각 그래픽 API의 GPU Resource로 생성
+```
+
+수동 WIC 구현을 한 번 완성한 이유는 편의 함수가 내부에서 하는 작업을 이해하기 위해서다. 실제 런타임 코드에서는 Microsoft의 DirectX Tool Kit `WICTextureLoader`를 이용하여 이 과정을 줄일 수 있다.
+
+`DirectXTex`는 Texture 리사이즈, Format 변환, Mipmap 생성, BC 압축, DDS 변환 같은 오프라인 에셋 처리 도구에 더 적합하다. 최종 프로젝트에서는 PNG/JPEG를 실행 중 매번 변환하기보다 미리 Mipmap과 압축을 적용한 DDS를 준비하는 방향으로 확장할 수 있다.
+
+---
+
+### 18. 다음 단계: 정적 모델 로더
+
+텍스처 출력 다음의 큰 목표는 모델 파일을 기존 `Mesh`로 변환하는 정적 모델 로더다.
+
+```text
+OBJ 또는 glTF
+→ Assimp::Importer::ReadFile
+→ aiScene
+→ aiNode 계층 순회
+→ 각 aiMesh에서 Position / Normal / UV / Index 추출
+→ LightSaver의 Vertex와 Index 배열로 변환
+→ Mesh::Initialize
+→ Model이 여러 Mesh를 소유
+→ Renderer에서 DrawIndexed
+```
+
+모델 파일 하나는 Body, Hair, Weapon처럼 여러 Mesh를 포함할 수 있으므로 `Model`은 하나의 `Mesh`가 아니라 여러 Mesh의 묶음이 된다.
+
+```cpp
+class Model
+{
+private:
+    std::vector<Mesh> Meshes;
+};
+```
+
+첫 모델 로더의 완료 기준은 다음과 같다.
+
+```text
+Position + Normal + UV + Index 읽기
+→ 여러 Mesh 생성
+→ Material의 기본 Texture 연결
+→ 하드코딩 큐브 대신 실제 정적 모델 출력
+```
+
+그다음에는 기본 Ambient/Directional Light로 Normal을 검증하고, 프로젝트 핵심인 손전등 Spot Light를 구현한다. 이후 모듈형 맵 에셋, 여러 오브젝트의 World Transform, 충돌, 몬스터 이동·정지 판정, 발전기 순서로 게임플레이를 확장한다.
+
+스켈레탈 애니메이션은 Bone Index/Weight, Animation Clip 보간, Bone 계층 행렬, Vertex Shader Skinning까지 필요한 별도 기능이므로 MVP 필수 범위에서는 제외한다. 손전등에 닿으면 정지하는 괴물 특성을 활용하여 먼저 정적 모델의 이동과 포즈 변화로 게임플레이를 완성하고, 일정이 남으면 Idle/Walk/Attack 세 Clip을 지원하는 방향으로 확장한다.

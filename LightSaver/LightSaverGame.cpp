@@ -1,55 +1,49 @@
 #include "LightSaverGame.h"
 #include "Shader.h"
 #include <cmath>
+#include <vector>
 bool LightSaverGame::OnInitialize()
 {
-	Vertex vertices[] =
-	{
-		{ -0.5f, -0.5f, -0.5f }, // 0
-		{  0.5f, -0.5f, -0.5f }, // 1
-		{  0.5f, -0.5f,  0.5f }, // 2
-		{ -0.5f, -0.5f,  0.5f }, // 3
 
-		{ -0.5f,  0.5f, -0.5f }, // 4
-		{  0.5f,  0.5f, -0.5f }, // 5
-		{  0.5f,  0.5f,  0.5f }, // 6
-		{ -0.5f,  0.5f,  0.5f }  // 7
-	};
+	std::vector<Vertex> vertices;
+	std::vector<UINT> indices;
 
-	UINT indices[] =
-	{
-		// 앞면
-		0, 4, 5,
-		0, 5, 1,
+	auto AddFace = [&](const DirectX::XMFLOAT3& v0, const DirectX::XMFLOAT3& v1, const DirectX::XMFLOAT3& v2, const DirectX::XMFLOAT3& v3)
+		{
+			UINT baseIndex = vertices.size();
 
-		// 뒷면
-		3, 2, 6,
-		3, 6, 7,
+			vertices.push_back({ v0.x, v0.y, v0.z, 0.0f, 1.0f });
+			vertices.push_back({ v1.x, v1.y, v1.z, 0.0f, 0.0f });
+			vertices.push_back({ v2.x, v2.y, v2.z, 1.0f, 0.0f });
+			vertices.push_back({ v3.x, v3.y, v3.z, 1.0f, 1.0f });
 
-		// 왼쪽
-		0, 3, 7,
-		0, 7, 4,
+			indices.push_back(baseIndex + 0);
+			indices.push_back(baseIndex + 1);
+			indices.push_back(baseIndex + 2);
+			indices.push_back(baseIndex + 0);
+			indices.push_back(baseIndex + 2);
+			indices.push_back(baseIndex + 3);
+		};
 
-		// 오른쪽
-		1, 5, 6,
-		1, 6, 2,
+	// 앞면
+	AddFace({ -0.5f, -0.5f, -0.5f }, { -0.5f, 0.5f, -0.5f }, { 0.5f, 0.5f, -0.5f }, { 0.5f, -0.5f, -0.5f });
+	// 뒷면
+	AddFace({ 0.5f, -0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, { -0.5f, 0.5f, 0.5f }, { -0.5f, -0.5f, 0.5f });
+	// 왼쪽
+	AddFace({ -0.5f, -0.5f, 0.5f }, { -0.5f, 0.5f, 0.5f }, { -0.5f, 0.5f, -0.5f }, { -0.5f, -0.5f, -0.5f });
+	// 오른쪽
+	AddFace({ 0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f }, { 0.5f, -0.5f, 0.5f });
+	// 아래
+	AddFace({ -0.5f, -0.5f, 0.5f }, { -0.5f, -0.5f, -0.5f }, { 0.5f, -0.5f, -0.5f }, { 0.5f, -0.5f, 0.5f });
+	// 위
+	AddFace({ -0.5f, 0.5f, -0.5f }, { -0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, -0.5f });
 
-		// 아래
-		0, 1, 2,
-		0, 2, 3,
-
-		// 위
-		4, 7, 6,
-		4, 6, 5
-	};
 	HRESULT result;
 
-	if (!MeshSet.Initialize(GetGraphics().Device, vertices, 8, indices, 36))
+	if (!MeshSet.Initialize(GetGraphics().Device, vertices.data(), 24, indices.data(), 36))
 	{
 		return false;
 	}
-
-
 
 	if (!ShaderSet.Initialize(GetGraphics().Device, L"shader.hlsl"))
 	{
@@ -61,6 +55,9 @@ bool LightSaverGame::OnInitialize()
 	ViewPort.Width = 1280.f;
 	ViewPort.MaxDepth = 1.0f;
 	ViewPort.MinDepth = 0.0f;
+
+	TextureSet.Initialize(GetGraphics().Device, L"Test.jpg");
+
 
 	D3D11_BUFFER_DESC CameraDesc = {};
 	CameraDesc.ByteWidth = sizeof(CameraBufferData);
@@ -169,6 +166,7 @@ bool LightSaverGame::Render()
 
 	ShaderSet.Bind(GetGraphics().DeviceContext);
 	MeshSet.Bind(GetGraphics().DeviceContext);
+	TextureSet.Bind(GetGraphics().DeviceContext);
 
 	GetGraphics().DeviceContext->DrawIndexed(MeshSet.GetIndexCount(), 0, 0);
     return true;

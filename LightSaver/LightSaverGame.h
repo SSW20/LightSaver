@@ -5,6 +5,7 @@
 #include "Camera.h"
 #include "Shader.h"
 #include "Mesh.h"
+#include "Texture.h"
 
 class Shader;
 
@@ -44,4 +45,5 @@ private:
 	float MouseSpeed = DirectX::XMConvertToRadians(0.1f);
 	Shader ShaderSet;
 	Mesh MeshSet;
+	Texture TextureSet;
 };

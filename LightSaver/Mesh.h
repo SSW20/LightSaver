@@ -3,9 +3,8 @@
 
 struct Vertex
 {
-	float x;
-	float y;
-	float z;
+	float x, y, z;
+	float u, v;
 };
 
 class Mesh
