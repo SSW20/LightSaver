@@ -6,7 +6,7 @@
 #include "Shader.h"
 #include "Mesh.h"
 #include "Texture.h"
-
+#include "Model.h"
 class Shader;
 
 struct alignas(16) CameraBufferData
@@ -20,8 +20,18 @@ struct alignas(16) ObjectBufferData
 	DirectX::XMFLOAT4X4 World;
 };
 
+struct alignas(16) LightBufferData
+{
+	DirectX::XMFLOAT3 ToLightDirection;
+	float AmbientStrength;
+
+	DirectX::XMFLOAT3 LightColor;
+	float DiffuseStrength;
+};
+
 static_assert(sizeof(CameraBufferData) % 16 == 0);
 static_assert(sizeof(ObjectBufferData) % 16 == 0);
+static_assert(sizeof(LightBufferData) % 16 == 0);
 
 class LightSaverGame : public GameLoop
 {
@@ -37,6 +47,7 @@ private:
 	D3D11_VIEWPORT ViewPort = {};
 	ID3D11Buffer* CameraBuffer = nullptr;
 	ID3D11Buffer* ObjectBuffer = nullptr;
+	ID3D11Buffer* LightBuffer = nullptr;
 	float Rotation = 0.0f;
 	float clearColor[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
 	Camera MainCamera;
@@ -46,4 +57,5 @@ private:
 	Shader ShaderSet;
 	Mesh MeshSet;
 	Texture TextureSet;
+	Model ModelSet;
 };

@@ -91,12 +91,14 @@ bool Texture::Initialize(ID3D11Device* Device, const wchar_t* FilePath)
 
 	SamplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
 
-	// 밉맵 단계 지정	
+	// 밉맵 단계 지정
 	SamplerDesc.MinLOD = 0.0f;
 	SamplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
 
 	Device->CreateSamplerState(&SamplerDesc, &Sampler);
 
+	Image->Release();
+	Image = nullptr;
 
 	Frame->Release();
 	Frame = nullptr;
@@ -107,6 +109,8 @@ bool Texture::Initialize(ID3D11Device* Device, const wchar_t* FilePath)
 	ImageFactory->Release();
 	ImageFactory = nullptr;
 
+
+
 	return true;
 
 }
@@ -115,6 +119,61 @@ void Texture::Bind(ID3D11DeviceContext* DeviceContext)
 {
 	DeviceContext->PSSetShaderResources(0, 1, &SRV);
 	DeviceContext->PSSetSamplers(0, 1, &Sampler);
+}
+
+void Texture::InitializeByColor(ID3D11Device* Device, unsigned char r, unsigned char g, unsigned char b, unsigned char a)
+{
+	// 이미지 CPU 바이트 배열로 저장
+	unsigned char PixelData[4] = { r,g,b,a };
+
+	D3D11_TEXTURE2D_DESC TextureDesc = {};
+
+	TextureDesc.Width = 1;
+	TextureDesc.Height = 1;
+
+	TextureDesc.MipLevels = 1;		// 원본 크기
+	TextureDesc.ArraySize = 1;		// 이미지 1장
+	TextureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+	TextureDesc.SampleDesc.Count = 1;		// MSAA 안씀
+	TextureDesc.SampleDesc.Quality = 0;
+
+	TextureDesc.Usage = D3D11_USAGE_IMMUTABLE;
+	TextureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+	TextureDesc.CPUAccessFlags = 0;
+	TextureDesc.MiscFlags = 0;
+
+	D3D11_SUBRESOURCE_DATA InitialData = {};
+	InitialData.pSysMem = PixelData;
+
+	InitialData.SysMemPitch = 4;
+	InitialData.SysMemSlicePitch = 0;
+
+	ID3D11Texture2D* Image = nullptr;
+	Device->CreateTexture2D(&TextureDesc, &InitialData, &Image);
+	Device->CreateShaderResourceView(Image, nullptr, &SRV);
+
+	D3D11_SAMPLER_DESC SamplerDesc = {};
+	// 선형 보간
+	SamplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+
+	// U, V 가 범위를 벗어났을 떄
+	SamplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+	SamplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+	SamplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+
+	SamplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+
+	// 밉맵 단계 지정
+	SamplerDesc.MinLOD = 0.0f;
+	SamplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+	Device->CreateSamplerState(&SamplerDesc, &Sampler);
+
+	Image->Release();
+	Image = nullptr;
+
 }
 
 Texture::~Texture()

@@ -10,6 +10,8 @@ public:
 
     void Bind(ID3D11DeviceContext* DeviceContext);
 
+    void InitializeByColor(ID3D11Device* Device, unsigned char r, unsigned char g, unsigned char b, unsigned char a);
+
     ~Texture();
 
 private:

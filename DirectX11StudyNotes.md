@@ -4872,3 +4872,1223 @@ Position + Normal + UV + Index 읽기
 그다음에는 기본 Ambient/Directional Light로 Normal을 검증하고, 프로젝트 핵심인 손전등 Spot Light를 구현한다. 이후 모듈형 맵 에셋, 여러 오브젝트의 World Transform, 충돌, 몬스터 이동·정지 판정, 발전기 순서로 게임플레이를 확장한다.
 
 스켈레탈 애니메이션은 Bone Index/Weight, Animation Clip 보간, Bone 계층 행렬, Vertex Shader Skinning까지 필요한 별도 기능이므로 MVP 필수 범위에서는 제외한다. 손전등에 닿으면 정지하는 괴물 특성을 활용하여 먼저 정적 모델의 이동과 포즈 변화로 게임플레이를 완성하고, 일정이 남으면 Idle/Walk/Attack 세 Clip을 지원하는 방향으로 확장한다.
+
+---
+
+## 2026-08-19 — vcpkg와 Assimp, 정적 모델·재질·조명 로딩
+
+### 오늘의 목표와 결과
+
+이전 단계까지는 C++ 코드 안에 큐브의 정점과 인덱스를 직접 적었다. 이 방법은 Direct3D의 Vertex Buffer와 Index Buffer를 이해하기에는 좋지만, 실제 게임의 맵이나 괴물처럼 복잡한 모델을 작성하는 방법은 아니다. 실제 모델은 Blender 같은 도구에서 만든 뒤 OBJ, FBX, glTF 등의 파일로 저장하고, 게임 프로그램이 그 파일을 읽어 기존 `Mesh` 객체로 바꿔야 한다.
+
+오늘은 다음 흐름을 완성했다.
+
+```text
+OBJ 모델 파일
+│
+├─ 정점 위치 Position
+├─ 텍스처 좌표 UV
+├─ 법선 Normal
+├─ 면을 구성하는 Index
+└─ 사용할 Material 번호
+        │
+        └─ MTL 파일
+             └─ Diffuse Texture 경로
+
+                ↓ Assimp가 해석
+
+aiScene
+├─ aiMesh 목록
+└─ aiMaterial 목록
+
+                ↓ LightSaver 형식으로 변환
+
+Model
+├─ ModelData[]
+│   ├─ Mesh
+│   └─ MaterialIndex
+└─ MaterialData[]
+    └─ DiffuseTexture
+
+                ↓ Draw
+
+Mesh Bind + 해당 Material의 Texture Bind + DrawIndexed
+```
+
+최종적으로 여러 Mesh와 여러 Material을 가진 Spider OBJ 모델을 불러와, 각 부위에 맞는 Texture를 연결하고 Directional Light를 적용하여 화면에 출력했다. Diffuse Texture가 없는 Material에는 1×1 흰색 Texture를 자동으로 생성하여 대신 사용하는 기능도 검증했다.
+
+---
+
+### 1. 모델 로더가 필요한 이유
+
+GPU는 OBJ나 FBX 파일을 직접 읽지 못한다. Direct3D 11의 Input Assembler가 읽는 것은 `ID3D11Buffer`에 저장된 정점과 인덱스뿐이다.
+
+따라서 모델 로더는 다음 사이를 연결하는 번역기다.
+
+```text
+디자이너와 모델링 프로그램이 사용하는 파일 형식
+                        ↓ 번역
+우리 엔진의 Vertex 배열과 Index 배열
+                        ↓ Mesh::Initialize
+Direct3D 11 Vertex Buffer와 Index Buffer
+```
+
+모델 로더가 렌더링을 직접 하는 것은 아니다. 파일의 데이터를 읽고, 이미 만들어 둔 `Mesh`와 `Texture`가 사용할 수 있는 형태로 변환하는 역할을 한다.
+
+현재 클래스들의 책임은 다음과 같다.
+
+```text
+Mesh
+→ 정점 버퍼와 인덱스 버퍼를 소유
+→ 하나의 기하 형태를 그릴 수 있게 한다
+
+Texture
+→ 이미지에서 만든 SRV와 Sampler를 소유
+→ Pixel Shader의 t0, s0 슬롯에 연결한다
+
+MaterialData
+→ Mesh를 어떤 표면으로 보이게 할지 결정하는 Texture를 소유
+
+Model
+→ 파일 하나에서 읽은 여러 Mesh와 여러 Material을 묶어서 소유
+→ 각 Mesh가 어느 Material을 사용하는지 연결
+```
+
+`Model`과 `Mesh`가 따로 필요한 핵심 이유는 모델 파일 하나가 Mesh 하나라는 보장이 없기 때문이다. 예를 들어 캐릭터 파일 하나에 몸, 눈, 옷, 무기가 각각 별도의 Mesh로 들어갈 수 있다. 각 부분은 서로 다른 Texture를 사용할 수도 있다.
+
+---
+
+### 2. vcpkg는 무엇을 해결하는가
+
+Assimp를 직접 사용하려면 최소한 다음 작업이 필요하다.
+
+```text
+1. Assimp 소스 또는 빌드된 라이브러리 준비
+2. Header를 찾을 Include Directory 설정
+3. .lib를 찾을 Library Directory 설정
+4. Linker에 Assimp .lib 추가
+5. 실행할 때 필요한 DLL 배치
+6. Debug/Release와 x86/x64 조합 일치
+```
+
+이 작업을 프로젝트마다 수동으로 하면 경로가 컴퓨터에 종속되고, 다른 사람이 저장소를 받았을 때 같은 환경을 다시 만들기 어렵다. vcpkg는 C/C++ 라이브러리의 다운로드, 빌드, 설치, Visual Studio 연동을 관리한다.
+
+이번 프로젝트는 Manifest Mode를 사용한다. 저장소 루트의 `vcpkg.json`이 이 프로젝트가 요구하는 외부 라이브러리 목록이다.
+
+```json
+{
+  "name": "lightsaver",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "assimp"
+  ],
+  "builtin-baseline": "..."
+}
+```
+
+각 항목의 의미는 다음과 같다.
+
+#### `name`
+
+Manifest 패키지의 이름이다. 현재 프로젝트를 vcpkg가 식별할 때 사용한다.
+
+#### `version-string`
+
+LightSaver 프로젝트 자체의 버전 문자열이다. Assimp 버전을 뜻하지 않는다.
+
+#### `dependencies`
+
+프로젝트가 직접 필요로 하는 라이브러리 목록이다. 현재는 `assimp` 하나를 적었지만, Assimp가 내부적으로 필요로 하는 다른 라이브러리는 vcpkg가 의존 관계를 따라 함께 설치한다.
+
+```text
+LightSaver가 assimp 요청
+→ vcpkg가 assimp의 의존성 조사
+→ 필요한 라이브러리를 올바른 순서로 설치
+```
+
+#### `builtin-baseline`
+
+어느 시점의 vcpkg 포트 목록을 기준으로 패키지 버전을 결정할지 고정한다. 같은 `vcpkg.json`을 사용하더라도 기준 시점이 계속 바뀌면 오늘과 한 달 후에 서로 다른 버전이 설치될 수 있다. Baseline은 재현 가능한 빌드를 위한 기준점이다.
+
+#### `x64-windows` Triplet
+
+Triplet은 어떤 환경용 라이브러리를 만들지 나타내는 설정 묶음이다.
+
+```text
+x64      → 64비트 CPU 대상
+windows  → Windows 대상
+```
+
+LightSaver의 빌드 플랫폼이 x64이면 Assimp도 x64로 만들어져야 한다. x64 프로그램에 x86 라이브러리를 연결할 수 없으므로 프로젝트와 vcpkg의 Triplet을 일치시켰다.
+
+#### Visual Studio의 vcpkg 옵션
+
+`Use Vcpkg Manifest`를 활성화하면 Visual Studio/MSBuild가 프로젝트를 빌드할 때 `vcpkg.json`을 찾고 필요한 패키지를 준비한다. 설치된 Header와 Library 경로도 빌드에 자동으로 연결된다.
+
+이 과정은 CMake의 다음 부분과 목적이 비슷하다.
+
+```text
+find_package
+target_link_libraries
+include 경로 설정
+```
+
+문법과 동작 주체는 다르지만, 프로젝트가 어떤 외부 라이브러리를 필요로 하는지 선언하고 빌드 시스템에 연결한다는 목적은 같다.
+
+#### `vcpkg_installed/`를 Git에 올리지 않는 이유
+
+`vcpkg_installed/`에는 설치된 Header, `.lib`, DLL, 중간 빌드 결과가 들어간다. 이것은 소스 코드가 아니라 `vcpkg.json`을 보고 다시 만들 수 있는 생성물이다.
+
+```text
+Git에 저장해야 하는 것
+→ vcpkg.json
+
+각 컴퓨터에서 다시 생성되는 것
+→ vcpkg_installed/
+```
+
+폴더 크기도 매우 커지고 플랫폼과 빌드 환경에 따라 내용이 달라지므로 `.gitignore`에 추가했다.
+
+---
+
+### 3. Assimp는 무엇을 하는가
+
+Assimp는 Open Asset Import Library의 줄임말이다. Direct3D 11 전용 라이브러리가 아니라, 여러 3D 모델 형식을 공통 구조로 변환해 주는 파일 해석 라이브러리다.
+
+```text
+OBJ / FBX / glTF / DAE 등
+             ↓ Assimp
+          aiScene
+```
+
+우리는 모든 파일 형식의 문법을 직접 구현할 필요 없이 `aiScene`이라는 공통 구조만 처리하면 된다. 이후 `aiScene`의 데이터를 LightSaver의 `Vertex`, `Mesh`, `Texture` 구조로 변환한다.
+
+```cpp
+Assimp::Importer Importer;
+
+const aiScene* Scene =
+    Importer.ReadFile(FilePath, ImportFlag);
+```
+
+#### `Assimp::Importer`
+
+Importer는 파일을 열고 해석하며, 만들어진 Scene 메모리의 수명도 관리한다. `Scene`은 Importer가 소유한 데이터를 가리키는 포인터이므로 Importer가 파괴된 뒤에는 사용하면 안 된다.
+
+현재 코드는 `Initialize()` 안에서 Scene의 정보를 전부 자체 `Mesh`와 `Texture`로 복사한다.
+
+```text
+Importer 생성
+→ ReadFile
+→ Scene 데이터를 우리 객체로 복사
+→ Initialize 종료
+→ Importer와 Scene 파괴
+→ 복사해 둔 Mesh/Texture는 계속 유효
+```
+
+이 때문에 `Scene` 포인터를 `Model` 멤버로 보관할 필요가 없다.
+
+#### Scene 유효성 검사
+
+```cpp
+if (Scene == nullptr ||
+    Scene->mRootNode == nullptr ||
+    (Scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE))
+{
+    return false;
+}
+```
+
+- `Scene == nullptr`: 파일 읽기 자체가 실패했다.
+- `mRootNode == nullptr`: 모델의 계층 구조를 시작할 Root Node가 없다.
+- `AI_SCENE_FLAGS_INCOMPLETE`: Scene이 불완전한 상태다.
+
+이 검사를 통과한 뒤에만 Mesh와 Material 배열에 접근해야 한다.
+
+---
+
+### 4. aiScene의 전체 구조
+
+`aiScene`은 모델 하나를 해석한 결과 전체를 담는 상자다.
+
+```text
+aiScene
+├─ mRootNode
+│   └─ 모델의 Node 계층 구조
+├─ mMeshes[]
+│   └─ 위치, UV, Normal, Face 같은 기하 데이터
+├─ mMaterials[]
+│   └─ Texture 경로와 재질 속성
+├─ mTextures[]
+│   └─ 파일 내부에 포함된 Embedded Texture
+└─ mAnimations[]
+    └─ Animation Clip 데이터
+```
+
+중요한 점은 Node와 Mesh가 같은 것이 아니라는 것이다.
+
+- `aiMesh`: 실제 정점과 면 데이터
+- `aiNode`: Mesh가 모델 계층에서 어디에 배치되는지 나타내는 구조
+
+예를 들어 자동차 모델이라면 다음처럼 구성될 수 있다.
+
+```text
+CarRoot
+├─ BodyNode       → BodyMesh 사용
+├─ LeftWheelNode  → WheelMesh 사용 + 왼쪽 위치 변환
+└─ RightWheelNode → 같은 WheelMesh 사용 + 오른쪽 위치 변환
+```
+
+Wheel Mesh의 정점 원본은 하나여도 서로 다른 Node가 다른 위치에서 사용할 수 있다.
+
+---
+
+### 5. Import 후처리 Flag의 의미
+
+현재 사용한 Flag는 파일마다 제각각인 데이터를 렌더러가 기대하는 형태로 정리한다.
+
+```cpp
+aiProcess_Triangulate |
+aiProcess_JoinIdenticalVertices |
+aiProcess_MakeLeftHanded |
+aiProcess_FlipWindingOrder |
+aiProcess_FlipUVs |
+aiProcess_PreTransformVertices |
+aiProcess_GenSmoothNormals
+```
+
+#### `aiProcess_Triangulate`
+
+사각형이나 그 이상의 다각형을 삼각형으로 나눈다. 현재 렌더러는 `D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST`를 사용하므로 모든 Face가 삼각형이어야 다루기 쉽다.
+
+```text
+사각형 Face {0, 1, 2, 3}
+→ 삼각형 {0, 1, 2}
+→ 삼각형 {0, 2, 3}
+```
+
+#### `aiProcess_JoinIdenticalVertices`
+
+동일한 Vertex를 합쳐 Index로 재사용한다. 똑같은 Position, UV, Normal을 가진 정점을 중복 저장하는 일을 줄인다.
+
+단, Position만 같다고 항상 같은 Vertex인 것은 아니다. 큐브 모서리처럼 위치는 같아도 면마다 UV나 Normal이 다르면 서로 다른 Vertex로 남아야 한다.
+
+#### `aiProcess_MakeLeftHanded`
+
+모델 데이터를 왼손 좌표계로 변환한다. 현재 LightSaver와 DirectXMath 카메라는 왼손 좌표계를 사용하므로 파일의 좌표계를 렌더러 기준에 맞춘다.
+
+#### `aiProcess_FlipWindingOrder`
+
+삼각형의 정점 나열 순서를 뒤집는다. 좌표계를 변환하면 앞면과 뒷면 방향도 영향을 받을 수 있으므로 현재 Rasterizer가 기대하는 Winding Order와 맞춘다.
+
+#### `aiProcess_FlipUVs`
+
+UV의 V축 방향을 뒤집는다. 모델 파일과 Texture API가 이미지의 위아래를 해석하는 기준 차이를 맞추기 위해 사용한다.
+
+#### `aiProcess_GenSmoothNormals`
+
+파일에 Normal이 없으면 주변 Face 방향을 바탕으로 부드러운 Normal을 생성한다. Normal이 없으면 현재 Diffuse Lighting의 밝기를 계산할 수 없다.
+
+#### `aiProcess_PreTransformVertices`
+
+Node가 가진 이동, 회전, 크기를 Vertex에 미리 적용한다.
+
+```text
+Mesh 원본 Local Vertex
+× 그 Mesh를 사용하는 Node Transform
+× 부모 Node Transform
+→ Model Local Vertex로 미리 저장
+```
+
+여기서 결과는 아직 게임 월드 좌표가 아니다. 모델 파일 내부의 여러 부품이 서로 올바른 위치에 조립된 `Model Local` 좌표다.
+
+렌더링할 때는 여기에 다시 오브젝트의 World 행렬을 적용한다.
+
+```text
+Mesh 원본 좌표
+→ Node 계층 적용
+→ Model Local 좌표
+→ World 행렬 적용
+→ World 좌표
+→ View
+→ Projection
+```
+
+이 Flag를 사용하면 직접 `mRootNode`부터 재귀 순회하며 부모 Transform을 누적하는 코드를 당장 작성하지 않아도 된다. 정적 모델을 빠르게 출력하기에 적합하다.
+
+대신 Node 계층이 Vertex에 구워져 평평해지므로 Node를 따로 움직이거나 Bone Animation을 처리하기에는 맞지 않는다. 현재 MVP는 정적 모델이 목표이므로 이 선택이 적절하다. 나중에 Animation을 구현한다면 이 Flag를 제거하고 Node/Bone 계층을 직접 보존해야 한다.
+
+---
+
+### 6. OBJ, MTL, 이미지 파일의 관계
+
+OBJ 모델 하나가 완성되어 보이려면 보통 세 종류의 파일이 함께 필요하다.
+
+```text
+model.obj
+→ Position, UV, Normal, Face
+→ 어느 Material을 사용할지 기록
+
+model.mtl
+→ Material의 이름과 색상 속성
+→ Diffuse Texture 파일 경로
+
+texture.png 또는 texture.jpg
+→ 실제 픽셀 이미지
+```
+
+OBJ의 다음 줄은 사용할 MTL 파일을 지정한다.
+
+```obj
+mtllib spider.mtl
+```
+
+다음 줄은 이후 Face들이 특정 Material을 사용한다고 지정한다.
+
+```obj
+usemtl Skin
+```
+
+MTL에서는 같은 이름의 Material을 정의한다.
+
+```mtl
+newmtl Skin
+map_Kd .\wal67ar_small.jpg
+```
+
+`map_Kd`는 Diffuse Color에 사용할 Texture 경로다.
+
+```text
+OBJ의 usemtl Skin
+→ MTL의 newmtl Skin 찾기
+→ map_Kd 경로 확인
+→ JPG를 Texture로 로딩
+```
+
+OBJ만 있고 MTL이나 이미지가 없으면 기하 형태는 읽을 수 있어도 원래 표면은 재현되지 않는다. 반대로 이미지 파일만 있어도 어떤 Mesh의 어느 UV에 사용할지 알 수 없다.
+
+Spider 모델은 여러 Material을 사용하므로 몸통, 다리, 눈 등의 부위가 서로 다른 JPG를 참조한다. 이를 통해 여러 Mesh/Material 연결이 실제로 작동하는지 확인했다.
+
+---
+
+### 7. `ProcessMesh()`가 aiMesh를 우리 Mesh로 바꾸는 과정
+
+`aiMesh`는 Assimp의 형식이고 `Mesh`는 LightSaver의 형식이다. `ProcessMesh()`는 둘 사이를 변환한다.
+
+#### Vertex 배열 준비
+
+```cpp
+std::vector<Vertex> SourceVertices;
+SourceVertices.reserve(SourceMesh->mNumVertices);
+```
+
+`reserve()`는 앞으로 필요한 메모리 용량을 미리 확보하지만 Vector의 원소 개수는 늘리지 않는다.
+
+```text
+size     = 0
+capacity = mNumVertices
+```
+
+이후 `push_back()`으로 Vertex를 한 개씩 추가한다.
+
+```cpp
+SourceVertices.push_back(NewVertex);
+```
+
+여기서 `resize(mNumVertices)`를 한 뒤 다시 `push_back()`하면 기본 Vertex가 먼저 mNumVertices개 생기고 그 뒤에 실제 Vertex가 추가되어 원소 수가 두 배가 된다. 이번 구조에서는 `reserve + push_back` 조합이 맞다.
+
+#### Position 복사
+
+```cpp
+NewVertex.x = SourceMesh->mVertices[i].x;
+NewVertex.y = SourceMesh->mVertices[i].y;
+NewVertex.z = SourceMesh->mVertices[i].z;
+```
+
+`mVertices[i]`는 i번 Vertex의 Position이다.
+
+#### UV 복사
+
+```cpp
+if (SourceMesh->HasTextureCoords(0))
+{
+    NewVertex.u = SourceMesh->mTextureCoords[0][i].x;
+    NewVertex.v = SourceMesh->mTextureCoords[0][i].y;
+}
+```
+
+`mTextureCoords`는 먼저 UV 채널을 고르고, 그다음 Vertex를 고르는 2단 구조다.
+
+```text
+mTextureCoords[0][i]
+               │  └─ i번 Vertex
+               └──── 0번 UV 채널
+```
+
+대부분의 기본 모델은 UV 채널 0을 사용한다. 두 번째 UV 채널은 Lightmap처럼 별도 좌표가 필요할 때 사용할 수 있다.
+
+#### Normal 복사
+
+```cpp
+if (SourceMesh->HasNormals())
+{
+    NewVertex.nx = SourceMesh->mNormals[i].x;
+    NewVertex.ny = SourceMesh->mNormals[i].y;
+    NewVertex.nz = SourceMesh->mNormals[i].z;
+}
+```
+
+Normal은 표면이 어느 방향을 향하는지 나타내는 방향 벡터다. Position처럼 표면의 위치를 뜻하지 않는다. 조명이 표면을 정면으로 비추는지 옆에서 비추는지 판단할 때 사용한다.
+
+#### Face와 Index 복사
+
+```cpp
+for (UINT i = 0; i < SourceMesh->mNumFaces; ++i)
+{
+    for (UINT j = 0;
+         j < SourceMesh->mFaces[i].mNumIndices;
+         ++j)
+    {
+        SourceIndices.push_back(
+            SourceMesh->mFaces[i].mIndices[j]);
+    }
+}
+```
+
+`mFaces[i]`는 i번째 면이고, `mIndices[j]`는 그 면을 구성하는 Vertex 번호다. `Triangulate`를 적용했으므로 정상적인 Face는 보통 Index 세 개를 가진다.
+
+```text
+Face 0 → {0, 1, 2}
+Face 1 → {2, 1, 3}
+```
+
+완성된 배열은 기존 `Mesh::Initialize()`로 전달한다.
+
+```text
+Assimp CPU 데이터
+→ std::vector<Vertex>, std::vector<UINT>
+→ Mesh::Initialize
+→ ID3D11Buffer VertexBuffer
+→ ID3D11Buffer IndexBuffer
+```
+
+이 구조의 장점은 모델 파일 형식이 바뀌어도 GPU Buffer를 만드는 `Mesh` 코드는 바뀌지 않는다는 것이다.
+
+---
+
+### 8. Vertex에 Normal을 추가하면서 바뀐 Input Layout
+
+현재 Vertex의 메모리 구조는 다음과 같다.
+
+```cpp
+struct Vertex
+{
+    float x, y, z;       // 12 bytes
+    float u, v;          //  8 bytes
+    float nx, ny, nz;    // 12 bytes
+};
+```
+
+총 크기는 32바이트다.
+
+```text
+Offset 0                 Position float3
+Offset 12                UV       float2
+Offset 20                Normal   float3
+끝 Offset 32             다음 Vertex 시작
+```
+
+Input Layout도 이 실제 메모리 배치와 정확히 일치해야 한다.
+
+```cpp
+POSITION → R32G32B32_FLOAT, Offset 0
+TEXCOORD → R32G32_FLOAT,    Offset 12
+NORMAL   → R32G32B32_FLOAT, Offset 20
+```
+
+HLSL 입력도 같은 Semantic을 요구한다.
+
+```hlsl
+struct VS_INPUT
+{
+    float3 position : POSITION;
+    float2 texcoord : TEXCOORD;
+    float3 normal   : NORMAL;
+};
+```
+
+이 중 하나라도 Format, Offset, Semantic이 틀리면 GPU는 바이트를 잘못 해석한다. 예를 들어 Normal Offset을 12로 지정하면 UV의 바이트부터 Normal이라고 읽게 된다.
+
+---
+
+### 9. 여러 Mesh와 Material을 연결하는 `MaterialIndex`
+
+Scene에는 Mesh 배열과 Material 배열이 따로 있다.
+
+```text
+Scene->mMeshes[]
+Scene->mMaterials[]
+```
+
+각 `aiMesh`의 `mMaterialIndex`는 Material 배열의 몇 번째 항목을 사용할지 알려 준다.
+
+```cpp
+NewModelData.MaterialIndex =
+    SourceMesh->mMaterialIndex;
+```
+
+LightSaver도 같은 관계를 보존한다.
+
+```cpp
+struct ModelData
+{
+    std::unique_ptr<Mesh> MeshData;
+    UINT MaterialIndex;
+};
+
+struct MaterialData
+{
+    std::unique_ptr<Texture> DiffuseTexture;
+};
+```
+
+예를 들어 다음과 같다면:
+
+```text
+ModelData[0].MaterialIndex = 2
+```
+
+0번 Mesh를 그릴 때 `MaterialDatas[2]`의 Texture를 사용한다.
+
+```cpp
+MaterialDatas[ModelData.MaterialIndex]
+    .DiffuseTexture->Bind(DeviceContext);
+```
+
+Mesh와 Material을 인덱스로 연결하면 같은 Material을 여러 Mesh가 공유할 수도 있다.
+
+---
+
+### 10. `unique_ptr`, `std::move`, 소유권
+
+`Mesh`와 `Texture`는 내부에 COM Resource 포인터를 소유한다. 이 객체가 무심코 복사되면 두 객체가 같은 COM 포인터를 해제하여 이중 해제 문제가 생길 수 있다. 현재는 `std::unique_ptr`로 한 객체의 소유자가 하나뿐임을 표현한다.
+
+```cpp
+auto NewMesh = std::make_unique<Mesh>();
+```
+
+```text
+NewMesh
+→ 새 Mesh 객체를 유일하게 소유
+```
+
+Vector에 넣을 때는 복사하지 않고 소유권을 이동한다.
+
+```cpp
+NewModelData.MeshData = std::move(NewMesh);
+```
+
+이후 상태는 다음과 같다.
+
+```text
+이동 전
+NewMesh ─────→ Mesh
+
+이동 후
+NewMesh       → nullptr
+MeshData ─────→ Mesh
+```
+
+`std::move`가 객체 메모리 자체를 물리적으로 복사한다는 뜻은 아니다. 이 값을 이제 다른 소유자에게 넘겨도 된다는 이동 가능 상태로 변환한다. `unique_ptr`의 경우 내부 포인터의 소유권이 전달된다.
+
+`ModelDatas.clear()`와 `MaterialDatas.clear()`는 같은 `Model` 객체에 다른 파일을 다시 로딩할 때 이전 Mesh와 Texture를 먼저 정리하기 위해 사용한다. `unique_ptr`가 Vector 안에 있으므로 `clear()`할 때 각 객체의 소멸자가 자동 호출된다.
+
+---
+
+### 11. Texture 경로를 모델 파일 기준으로 조합하는 이유
+
+MTL의 Texture 경로는 대개 모델 파일이 있는 폴더를 기준으로 한 상대 경로다.
+
+```mtl
+map_Kd .\SpiderTex.jpg
+```
+
+프로그램의 현재 Working Directory에 `SpiderTex.jpg`가 있는 것은 아니므로 그대로 WIC에 넘기면 파일을 찾지 못할 수 있다.
+
+```cpp
+std::filesystem::path ModelPath = FilePath;
+
+std::filesystem::path FullTexturePath =
+    ModelPath.parent_path() /
+    TexturePath.C_Str();
+```
+
+예:
+
+```text
+ModelPath
+= Assets/Models/Spider/spider.obj
+
+ModelPath.parent_path()
+= Assets/Models/Spider
+
+TexturePath
+= ./SpiderTex.jpg
+
+결과
+= Assets/Models/Spider/SpiderTex.jpg
+```
+
+`std::filesystem::path`를 사용하면 문자열을 직접 이어 붙이는 것보다 경로 구분자와 상대 경로 처리를 명확하게 표현할 수 있다.
+
+---
+
+### 12. Model의 실제 Draw 흐름
+
+Model은 자신이 가진 모든 Mesh를 순회한다.
+
+```cpp
+for (const auto& ModelData : ModelDatas)
+{
+    ModelData.MeshData->Bind(DeviceContext);
+
+    MaterialDatas[ModelData.MaterialIndex]
+        .DiffuseTexture->Bind(DeviceContext);
+
+    DeviceContext->DrawIndexed(
+        ModelData.MeshData->GetIndexCount(),
+        0,
+        0);
+}
+```
+
+Mesh 하나마다 다음 상태를 새로 선택한다.
+
+```text
+1. 이 부위의 Vertex/Index Buffer Bind
+2. 이 부위가 참조하는 Material의 Texture Bind
+3. DrawIndexed
+```
+
+Model에 Mesh가 다섯 개면 일반적으로 DrawIndexed도 다섯 번 호출된다. `DrawIndexed` 한 번이 모델 파일 전체를 자동으로 그리는 것이 아니다.
+
+현재 전체 프레임 흐름은 다음과 같다.
+
+```text
+LightSaverGame::Render
+├─ CameraBuffer 갱신
+├─ ObjectBuffer 갱신
+├─ LightBuffer 갱신
+├─ Render Target / Depth / Viewport 설정
+├─ Shader Bind
+└─ Model::Draw
+    ├─ Mesh 0 + Material Texture Bind → DrawIndexed
+    ├─ Mesh 1 + Material Texture Bind → DrawIndexed
+    └─ ...
+```
+
+---
+
+### 13. Normal은 왜 World 변환이 필요한가
+
+모델 파일의 Normal은 Model Local 공간에 있다. 모델이 회전했는데 Normal은 회전하지 않으면 화면에 보이는 표면 방향과 조명 계산에 사용하는 방향이 서로 달라진다.
+
+따라서 Vertex Shader에서 Normal도 World 방향으로 변환한다.
+
+```hlsl
+output.normal =
+    mul(input.normal, (float3x3)World);
+```
+
+`World`는 4×4 행렬이다. 그 안에는 이동, 회전, 크기 정보가 들어 있다.
+
+```text
+4×4 World Matrix
+┌                 ┐
+│ 회전/크기  ...  │
+│ 회전/크기  ...  │
+│ 회전/크기  ...  │
+│ 이동 x y z  1   │
+└                 ┘
+```
+
+이를 `(float3x3)`으로 변환하면 왼쪽 위 3×3 부분만 사용한다. 이동 정보가 있는 마지막 행/열이 제외된다.
+
+Normal은 위치가 아니라 방향이므로 이동시키면 안 된다.
+
+```text
+Position은 모델이 이동하면 함께 이동해야 함
+Normal은 모델이 이동해도 방향이 바뀌지 않음
+```
+
+다만 `(float3x3)World`만 사용하는 방식은 회전과 균일 Scale에는 적합하지만 비균일 Scale에서는 Normal이 표면과 수직을 유지하지 못할 수 있다.
+
+```text
+균일 Scale     (0.01, 0.01, 0.01) → 현재 방식 사용 가능
+비균일 Scale   (2.0, 1.0, 0.5)    → 역전치 Normal Matrix 필요
+```
+
+현재 Spider는 세 축에 모두 `0.01`을 적용하므로 균일 Scale이다.
+
+---
+
+### 14. Ambient Light와 Diffuse Light
+
+현재 Pixel Shader는 Texture 색상에 두 종류의 빛을 더한다.
+
+#### Ambient Light
+
+주변광은 빛의 방향과 관계없이 전체 표면에 최소 밝기를 준다.
+
+```hlsl
+float3 AmbientLight =
+    TextureColor.rgb * AmbientStrength;
+```
+
+주변광이 전혀 없으면 주광원이 닿지 않는 면이 완전한 검은색이 된다. 실제 간접광을 계산한 것은 아니고, 아직 Shadow나 Global Illumination이 없는 단계에서 최소한의 밝기를 단순하게 더한 것이다.
+
+#### Diffuse Light
+
+Diffuse는 빛이 표면을 얼마나 정면으로 비추는지에 따라 밝기가 달라지는 난반사 조명이다.
+
+```hlsl
+float3 Normal = normalize(input.normal);
+float3 ToLight = normalize(ToLightDirection);
+
+float Diffuse =
+    saturate(dot(Normal, ToLight));
+```
+
+내적의 결과는 두 방향이 얼마나 같은지 나타낸다.
+
+```text
+Normal과 ToLight가 같은 방향      → dot =  1 → 가장 밝음
+두 방향이 90도                    → dot =  0 → Diffuse 없음
+빛이 표면 뒤쪽에 있음             → dot < 0 → 0으로 제한
+```
+
+`saturate(x)`는 값을 0과 1 사이로 제한한다.
+
+```text
+saturate(-0.4) = 0
+saturate( 0.6) = 0.6
+saturate( 1.2) = 1
+```
+
+최종 Diffuse 색상은 다음 요소를 곱한다.
+
+```hlsl
+float3 DiffuseLight =
+    TextureColor.rgb *
+    LightColor *
+    Diffuse *
+    DiffuseStrength;
+```
+
+- `TextureColor`: 표면 원래 색
+- `LightColor`: 빛 자체의 색
+- `Diffuse`: 각도에 따른 밝기
+- `DiffuseStrength`: 빛의 전체 강도 조절
+
+최종 출력은 Ambient와 Diffuse를 더한 값이다.
+
+```hlsl
+return float4(
+    AmbientLight + DiffuseLight,
+    TextureColor.a);
+```
+
+현재 `ToLightDirection = (0, 0, -1)`은 표면에서 빛을 향하는 방향이 -Z라는 의미로 사용한다. 변수 이름이 `ToLightDirection`이므로 빛이 진행하는 방향이 아니라 표면에서 광원을 바라보는 방향이라는 점을 구분해야 한다.
+
+---
+
+### 15. Light Constant Buffer와 16바이트 정렬
+
+CPU 구조체와 HLSL cbuffer는 같은 메모리 배치를 가져야 한다.
+
+```cpp
+struct alignas(16) LightBufferData
+{
+    DirectX::XMFLOAT3 ToLightDirection;
+    float AmbientStrength;
+
+    DirectX::XMFLOAT3 LightColor;
+    float DiffuseStrength;
+};
+```
+
+```text
+첫 16 bytes
+float3 ToLightDirection 12 bytes
+float  AmbientStrength   4 bytes
+
+다음 16 bytes
+float3 LightColor       12 bytes
+float  DiffuseStrength   4 bytes
+
+총 32 bytes
+```
+
+HLSL도 같은 순서로 선언한다.
+
+```hlsl
+cbuffer LightBuffer : register(b2)
+{
+    float3 ToLightDirection;
+    float AmbientStrength;
+
+    float3 LightColor;
+    float DiffuseStrength;
+}
+```
+
+CPU에서 `Map(D3D11_MAP_WRITE_DISCARD)`으로 이번 프레임의 값을 기록하고 `Unmap()`한 뒤 Pixel Shader의 b2 슬롯에 연결한다.
+
+```cpp
+DeviceContext->PSSetConstantBuffers(
+    2, 1, &LightBuffer);
+```
+
+```text
+C++ StartSlot 2
+↕
+HLSL register(b2)
+```
+
+`LightBuffer`를 Vertex Shader에도 연결했지만 현재 조명 계산은 Pixel Shader에서만 수행하므로 실제로 읽는 곳은 PS의 b2다. 앞으로 VS에서 사용하지 않는다면 PS에만 Bind해도 된다.
+
+---
+
+### 16. Diffuse Texture가 없는 Material과 기본 흰색 Texture
+
+모든 Material이 `map_Kd`를 가진다는 보장은 없다. Texture가 없는 Material에서 다음 코드를 무조건 실행하면 `DiffuseTexture`가 null일 수 있다.
+
+```cpp
+DiffuseTexture->Bind(DeviceContext);
+```
+
+이를 막기 위해 Texture가 없는 Material에는 1×1 흰색 Texture를 만든다.
+
+```cpp
+NewTexture->InitializeByColor(
+    Device,
+    255, 255, 255, 255);
+```
+
+흰색을 사용하는 이유는 현재 Shader가 Texture 색상과 Lighting을 곱하기 때문이다.
+
+```text
+흰색 (1, 1, 1) × 조명색
+→ 조명색을 그대로 유지
+```
+
+검은색 기본 Texture를 쓰면 모든 조명 결과에 0이 곱해져 검게 보인다. 따라서 Texture가 없는 표면을 조명으로 확인하려면 흰색이 중립적인 기본값이다.
+
+#### `DXGI_FORMAT_R8G8B8A8_UNORM`
+
+```text
+R 8 bits
+G 8 bits
+B 8 bits
+A 8 bits
+합계 32 bits = 4 bytes per pixel
+```
+
+`UNORM`은 Unsigned Normalized를 뜻한다. CPU 메모리의 0~255 정수 값을 Shader에서 0.0~1.0 실수로 읽는다.
+
+```text
+CPU 0   → Shader 0.0
+CPU 128 → Shader 약 0.502
+CPU 255 → Shader 1.0
+```
+
+따라서 다음 배열은 완전히 불투명한 흰색 픽셀 하나다.
+
+```cpp
+unsigned char PixelData[4] =
+{
+    255, 255, 255, 255
+};
+```
+
+#### 1×1 Texture Descriptor
+
+```cpp
+TextureDesc.Width = 1;
+TextureDesc.Height = 1;
+TextureDesc.MipLevels = 1;
+TextureDesc.ArraySize = 1;
+TextureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+TextureDesc.Usage = D3D11_USAGE_IMMUTABLE;
+TextureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+```
+
+- 크기 1×1: 모든 UV에서 같은 한 픽셀을 사용한다.
+- MipLevels 1: 축소 단계가 필요 없는 단일 픽셀이다.
+- Immutable: 생성 뒤 픽셀 색을 변경하지 않는다.
+- Shader Resource: Pixel Shader에서 Sample할 수 있어야 한다.
+
+#### `SysMemPitch = 4`
+
+Pitch는 이미지 한 행의 바이트 수다.
+
+```text
+Width 1 pixel × RGBA 4 bytes = 한 행 4 bytes
+```
+
+따라서 1×1 RGBA Texture의 Pitch는 4다.
+
+#### SRV는 색상이 아니라 Texture를 보는 View다
+
+SRV 안에 흰색 값 자체를 직접 넣는 것은 아니다.
+
+```text
+PixelData[4]
+→ ID3D11Texture2D 생성
+→ 그 Texture를 가리키는 SRV 생성
+→ PSSetShaderResources로 t0에 Bind
+```
+
+파일에서 읽은 Texture와 기본 색 Texture는 만들어지는 출발점만 다르다.
+
+```text
+파일 Texture: WIC가 만든 RGBA 배열 → Texture2D → SRV
+기본 Texture: 직접 만든 RGBA 4 bytes → Texture2D → SRV
+```
+
+그 이후 Shader가 보는 것은 둘 다 똑같은 `Texture2D`와 SRV다. 그래서 Draw 코드에 별도의 Shader 분기가 필요 없다.
+
+---
+
+### 17. 기본 Texture 테스트에서 발생한 nullptr 오류
+
+Spider의 `Skin` Material에서 `map_Kd`를 잠시 제거하여 Texture가 없는 경로를 시험했다. 처음에는 `Texture::Bind()`에서 접근 위반이 발생했다.
+
+디버거에서 중요한 값은 다음이었다.
+
+```text
+this = nullptr
+```
+
+이것은 `SRV`가 null이라는 뜻이 아니라, `Bind()`를 호출한 `Texture` 객체 자체가 존재하지 않는다는 뜻이다.
+
+문제가 된 흐름은 다음과 같았다.
+
+```cpp
+auto NewTexture = std::make_unique<Texture>();
+
+if (Texture가 없음)
+{
+    NewTexture->InitializeByColor(...);
+    continue;
+}
+
+MaterialDatas[i].DiffuseTexture =
+    std::move(NewTexture);
+```
+
+기본 Texture는 `NewTexture` 안에 정상 생성됐지만, `MaterialDatas[i]`로 소유권을 옮기기 전에 `continue`로 다음 반복으로 넘어갔다.
+
+```text
+NewTexture 생성
+→ 흰색 SRV 생성
+→ continue
+→ 지역 unique_ptr 파괴
+→ 흰색 Texture도 파괴
+→ MaterialDatas[i].DiffuseTexture는 여전히 nullptr
+```
+
+수정한 흐름은 다음과 같다.
+
+```text
+NewTexture 생성
+→ 파일 Texture 또는 흰색 Texture로 초기화
+→ MaterialDatas[i].DiffuseTexture에 std::move
+→ 다음 반복
+```
+
+테스트 결과 `Skin`을 사용하는 몸통 윗부분만 흰색으로 출력되고 나머지 부위는 기존 JPG Texture를 사용했다. 이것으로 다음 세 관계가 모두 정상임을 확인했다.
+
+```text
+Mesh의 MaterialIndex 연결 정상
+Texture가 없는 Material 감지 정상
+InitializeByColor의 SRV Bind 정상
+```
+
+검증 뒤 `spider.mtl`의 원래 `map_Kd`를 복구했다.
+
+---
+
+### 18. 임시 Texture2D와 COM 수명
+
+SRV를 만들기 위해 지역 `ID3D11Texture2D* Image`가 필요하다.
+
+```cpp
+ID3D11Texture2D* Image = nullptr;
+
+Device->CreateTexture2D(
+    &TextureDesc,
+    &InitialData,
+    &Image);
+
+Device->CreateShaderResourceView(
+    Image,
+    nullptr,
+    &SRV);
+```
+
+SRV 생성이 성공하면 SRV가 Texture Resource에 필요한 COM 참조를 유지한다. 따라서 지역 포인터의 참조는 해제해야 한다.
+
+```cpp
+Image->Release();
+Image = nullptr;
+```
+
+이것은 GPU Texture를 즉시 없애는 것이 아니다.
+
+```text
+CreateTexture2D 후
+지역 Image 포인터가 참조 1개 소유
+
+CreateShaderResourceView 후
+SRV가 Texture에 필요한 참조 추가
+
+지역 Image Release 후
+지역 참조만 제거
+SRV가 참조하므로 Texture는 계속 존재
+```
+
+`Release()`하지 않으면 지역 변수는 함수 종료로 사라져도 COM 참조 횟수는 줄지 않아 Resource 누수가 발생한다.
+
+현재 `InitializeByColor()`는 학습 기능을 우선 완성한 상태다. 다음 리팩터링에서는 `CreateTexture2D`, `CreateShaderResourceView`, `CreateSamplerState`의 모든 `HRESULT`를 검사하고, 실패한 중간 단계에서도 이미 생성한 Resource를 정리해야 한다. `Microsoft::WRL::ComPtr`를 사용하면 여러 조기 반환 경로의 수동 `Release()`를 줄일 수 있다.
+
+---
+
+### 19. `.gitignore`의 `*.obj` 충돌
+
+C++ 컴파일러도 중간 산출물로 `.obj` 파일을 만들고, 3D 모델 형식도 `.obj` 확장자를 사용한다.
+
+기존 규칙은 모든 `.obj` 파일을 무시했다.
+
+```gitignore
+*.obj
+```
+
+이 규칙만 있으면 C++ 빌드 산출물뿐 아니라 다음 실제 모델도 Git에서 사라진다.
+
+```text
+Assets/Models/Spider/spider.obj
+Assets/Models/Test.obj
+```
+
+따라서 전체 `.obj` 무시 규칙 뒤에 에셋 폴더의 예외를 추가했다.
+
+```gitignore
+*.obj
+!LightSaver/Assets/**/*.obj
+```
+
+Git ignore 규칙은 뒤쪽 규칙이 앞쪽 규칙을 다시 뒤집을 수 있다. 이제 프로젝트 곳곳의 컴파일 산출물 `.obj`는 계속 무시하면서, `Assets` 아래의 3D 모델 OBJ만 저장소에 포함한다.
+
+---
+
+### 20. 현재 정적 Model Loader의 완료 범위
+
+현재 지원하는 기능은 다음과 같다.
+
+```text
+여러 aiMesh 읽기
+Position / UV / Normal 읽기
+Face Index 읽기
+여러 aiMaterial 읽기
+Mesh의 MaterialIndex 보존
+Diffuse Texture 0번 읽기
+모델 폴더 기준 Texture 경로 조합
+Texture가 없을 때 1×1 흰색 대체
+Node Transform을 Vertex에 미리 적용
+Ambient + Directional Diffuse Lighting
+```
+
+아직 지원하지 않는 항목은 다음과 같다.
+
+```text
+Material당 여러 Diffuse Texture
+Normal Map
+Metallic / Roughness PBR Material
+Embedded Texture
+투명 Material과 Blend State
+Node 계층을 보존한 개별 부품 Transform
+Bone / Skeletal Animation
+Resource 중복 로딩 방지와 캐시
+여러 Model Instance의 개별 World Transform 관리
+```
+
+MVP 공포 게임을 위해 이 기능을 전부 먼저 만들 필요는 없다. 현재 정적 모델을 Texture와 조명까지 포함하여 출력할 수 있으므로 모델 로더의 첫 번째 완료 기준을 달성했다.
+
+---
+
+### 21. 다음 단계: 손전등으로 이어지는 조명 확장
+
+현재 Directional Light는 위치가 없고 모든 픽셀에서 같은 빛 방향을 사용한다. 태양처럼 매우 멀리 있는 광원을 단순화한 형태다.
+
+게임의 핵심인 손전등은 위치와 방향, 범위, 원뿔 각도가 필요하다. 바로 Spot Light 공식을 한 번에 작성하기보다 다음 순서로 확장한다.
+
+```text
+1. Vertex Shader에서 World Position을 Pixel Shader로 전달
+
+2. Point Light
+   픽셀에서 광원까지의 방향 계산
+   거리에 따라 밝기 감소
+
+3. Spot Light
+   광원의 Forward와 픽셀 방향의 내적
+   원뿔 안쪽만 밝게 처리
+   안쪽/바깥쪽 각도로 경계를 부드럽게 처리
+
+4. 카메라 연결
+   Light Position  = Camera Position
+   Light Direction = Camera Forward
+
+5. 게임플레이 판정
+   Monster가 손전등 거리와 원뿔 안에 있는지 CPU에서도 검사
+   범위 안이면 이동 정지
+```
+
+다음 과제는 `PS_INPUT`에 World Position을 추가하는 것이다. Pixel Shader가 각 픽셀의 월드 위치를 알아야 `LightPosition - WorldPosition`으로 광원 방향과 거리를 계산할 수 있다.
+
+---
+
+### 오늘의 핵심 요약
+
+```text
+vcpkg.json
+→ 프로젝트가 Assimp에 의존한다는 재현 가능한 선언
+
+Assimp
+→ 여러 모델 파일을 aiScene 공통 구조로 해석
+
+aiMesh
+→ Position, UV, Normal, Face/Index
+
+aiMaterial
+→ Diffuse Texture 같은 표면 정보
+
+mMaterialIndex
+→ 특정 Mesh와 특정 Material을 연결
+
+Model
+→ 여러 Mesh와 Material을 함께 소유하고 순서대로 Draw
+
+Normal + Light Direction의 내적
+→ 표면이 빛을 얼마나 정면으로 받는지 계산
+
+1×1 흰색 Texture
+→ 실제 Diffuse Texture가 없는 Material의 안전한 기본값
+
+unique_ptr + std::move
+→ Mesh와 Texture의 소유자를 하나로 유지
+
+PreTransformVertices
+→ Node 계층 변환을 Vertex에 미리 적용한 정적 모델용 단순화
+```
+
+이번 단계에서 가장 중요한 구조적 변화는 하드코딩한 큐브를 그리던 렌더러가 외부 모델 파일을 받아 여러 Mesh와 Material을 처리할 수 있게 되었다는 점이다. 앞으로 맵, 발전기, 괴물 모델을 바꾸더라도 GPU Buffer 생성과 Draw의 기본 구조를 다시 작성할 필요가 없다.

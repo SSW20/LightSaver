@@ -7,6 +7,8 @@ Release/
 *.VC.db
 *.VC.VC.opendb
 *.obj
+!LightSaver/Assets/**/*.obj
+vcpkg_installed/
 *.pdb
 *.ilk
 *.log
