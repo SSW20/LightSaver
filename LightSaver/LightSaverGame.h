@@ -22,11 +22,18 @@ struct alignas(16) ObjectBufferData
 
 struct alignas(16) LightBufferData
 {
-	DirectX::XMFLOAT3 ToLightDirection;
+	DirectX::XMFLOAT3 SpotDirection;
 	float AmbientStrength;
 
 	DirectX::XMFLOAT3 LightColor;
 	float DiffuseStrength;
+
+	DirectX::XMFLOAT3 LightPosition;
+	float LightRange;
+
+	float SpotOuterCos;
+	float SpotInnerCos;
+	DirectX::XMFLOAT2 Padding;
 };
 
 static_assert(sizeof(CameraBufferData) % 16 == 0);

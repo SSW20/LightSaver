@@ -10,6 +10,9 @@ public:
 	DirectX::XMMATRIX GetViewMatrix() const;
 	DirectX::XMMATRIX GetProjectionMatrix() const;
 
+	DirectX::XMVECTOR GetCameraPosition() const;
+
+
 	void AddForward(float distance);
 	void AddRight(float distance);
 	void AddRotation(float yawDelta, float pitchDelta);

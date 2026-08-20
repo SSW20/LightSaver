@@ -37,6 +37,12 @@ DirectX::XMMATRIX Camera::GetProjectionMatrix() const
     return DirectX::XMMatrixPerspectiveFovLH(FovY, AspectRatio, NearZ, FarZ);
 }
 
+DirectX::XMVECTOR Camera::GetCameraPosition() const
+{
+    return DirectX::XMLoadFloat3(&Position);
+}
+
+
 void Camera::AddForward(float distance)
 {
     DirectX::XMVECTOR Forward = GetForwardVector();

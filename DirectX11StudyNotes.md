@@ -6092,3 +6092,918 @@ PreTransformVertices
 ```
 
 이번 단계에서 가장 중요한 구조적 변화는 하드코딩한 큐브를 그리던 렌더러가 외부 모델 파일을 받아 여러 Mesh와 Material을 처리할 수 있게 되었다는 점이다. 앞으로 맵, 발전기, 괴물 모델을 바꾸더라도 GPU Buffer 생성과 Draw의 기본 구조를 다시 작성할 필요가 없다.
+
+---
+
+## 2026-08-20 — Point Light에서 카메라 손전등 Spot Light까지
+
+### 오늘의 목표와 결과
+
+기존 조명은 모든 픽셀이 같은 방향의 빛을 받는 Directional Light였다. 오늘은 여기에 위치, 거리, 범위, 원뿔 방향과 각도를 추가하여 카메라에 붙어 움직이는 Spot Light로 확장했다.
+
+구현 흐름은 다음과 같다.
+
+```text
+Directional Light
+빛의 방향만 존재
+        ↓
+Pixel Shader에 World Position 전달
+각 픽셀이 월드의 어디에 있는지 확보
+        ↓
+Point Light
+픽셀마다 광원 방향과 거리 계산
+        ↓
+Distance Attenuation
+멀어질수록 직접광 감소
+        ↓
+Spot Light
+광원의 진행 방향과 픽셀 방향의 각도 검사
+        ↓
+Camera 연결
+LightPosition  = Camera Position
+SpotDirection = Camera Forward
+```
+
+현재 결과는 카메라가 움직이면 광원 위치도 같이 움직이고, 마우스로 카메라를 회전하면 Spot Light 원뿔도 화면 중앙을 따라 회전하는 손전등의 기본 형태다.
+
+---
+
+### 1. Directional Light만으로 손전등을 만들 수 없는 이유
+
+Directional Light는 광원이 무한히 멀리 있다고 가정한다. 그래서 모든 픽셀에서 빛의 방향이 같다.
+
+```hlsl
+float3 ToLightDir = normalize(ToLightDirection);
+```
+
+이 방식에는 다음 정보가 없다.
+
+```text
+광원의 위치
+픽셀과 광원 사이의 거리
+빛이 도달하는 최대 범위
+빛이 퍼지는 원뿔의 방향
+원뿔의 안쪽 각도와 바깥쪽 각도
+```
+
+태양처럼 넓은 공간에 평행하게 들어오는 빛에는 적합하지만, 플레이어 손에 붙어 좁은 범위를 비추는 손전등에는 적합하지 않다.
+
+손전등을 만들려면 Pixel Shader가 적어도 다음 값을 알아야 한다.
+
+```text
+현재 픽셀의 월드 위치
+손전등의 월드 위치
+손전등이 향하는 월드 방향
+손전등의 최대 거리
+손전등 원뿔의 각도
+```
+
+---
+
+### 2. Pixel Shader에 World Position이 필요한 이유
+
+기존 Pixel Shader는 Texture 좌표와 Normal만 받았다. 그러나 광원의 위치가 생기면 각 픽셀에서 광원까지의 방향이 서로 달라진다.
+
+```text
+왼쪽에 있는 픽셀 → 광원은 오른쪽 위에 있음
+오른쪽에 있는 픽셀 → 광원은 왼쪽 위에 있음
+광원과 가까운 픽셀 → 거리가 짧음
+광원과 먼 픽셀 → 거리가 김
+```
+
+따라서 Vertex Shader에서 계산한 World Position을 Pixel Shader로 전달했다.
+
+```hlsl
+struct PS_INPUT
+{
+    float4 position      : SV_POSITION;
+    float3 worldPosition : POSITION1;
+    float2 texcoord      : TEXCOORD;
+    float3 normal        : NORMAL;
+};
+```
+
+Vertex Shader의 위치 변환은 다음 순서다.
+
+```hlsl
+float4 localPosition = float4(input.position, 1.0f);
+float4 worldPosition = mul(localPosition, World);
+float4 viewPosition = mul(worldPosition, View);
+output.position = mul(viewPosition, Projection);
+
+output.worldPosition = worldPosition.xyz;
+```
+
+두 출력은 목적이 다르다.
+
+```text
+output.position
+→ Rasterizer가 화면에서 삼각형과 픽셀 위치를 결정하는 최종 Clip Position
+
+output.worldPosition
+→ 조명 계산을 위해 Pixel Shader에 전달하는 World Position
+```
+
+Rasterizer는 삼각형 세 정점의 `worldPosition`을 각 픽셀까지 보간한다. 따라서 Pixel Shader는 픽셀마다 서로 다른 월드 위치를 받는다.
+
+---
+
+### 3. 위치 두 개를 빼면 방향과 거리를 얻을 수 있다
+
+광원 위치를 `L`, 현재 픽셀 위치를 `P`라고 하자.
+
+```text
+L = LightPosition
+P = input.worldPosition
+```
+
+픽셀에서 광원으로 향하는 벡터는 다음과 같다.
+
+```text
+L - P
+```
+
+코드에서는 다음과 같다.
+
+```hlsl
+float3 PixelToLight = LightPosition - input.worldPosition;
+```
+
+예를 들어:
+
+```text
+P = (1, 0, 2)
+L = (1, 0, 7)
+
+L - P
+= (1, 0, 7) - (1, 0, 2)
+= (0, 0, 5)
+```
+
+이 벡터에는 두 정보가 동시에 들어 있다.
+
+```text
+방향: +Z
+길이: 5
+```
+
+`length()`는 벡터의 길이, 즉 거리를 구한다.
+
+```hlsl
+float ToLightDistance = length(PixelToLight);
+```
+
+3차원 벡터 `(x, y, z)`의 길이는 피타고라스 정리를 3차원으로 확장한 것이다.
+
+```text
+|v| = sqrt(x² + y² + z²)
+```
+
+방향만 필요할 때는 `normalize()`를 사용한다.
+
+```hlsl
+float3 ToLightDir = normalize(PixelToLight);
+```
+
+정규화는 방향을 유지하면서 길이를 1로 만든다.
+
+```text
+normalize(v) = v / |v|
+```
+
+거리 계산은 정규화 전에 해야 한다. 정규화한 벡터는 길이가 언제나 1이므로 원래 거리를 잃어버리기 때문이다.
+
+---
+
+### 4. Point Light의 Diffuse 계산
+
+Directional Light에서는 모든 픽셀이 같은 빛 방향을 사용했다. Point Light에서는 픽셀마다 다음 방향을 다시 계산한다.
+
+```hlsl
+float3 ToLightDir =
+    normalize(LightPosition - input.worldPosition);
+```
+
+표면 Normal과 빛 방향을 모두 정규화하면 내적은 두 방향 사이 각도의 코사인이 된다.
+
+```text
+dot(N, L) = |N||L|cos(theta)
+
+|N| = 1, |L| = 1이면
+dot(N, L) = cos(theta)
+```
+
+각도별 값은 다음과 같다.
+
+```text
+theta =   0도 → cos =  1 → 빛을 정면으로 받음
+theta =  60도 → cos = 0.5 → 절반 정도 기울어짐
+theta =  90도 → cos =  0 → 빛이 표면을 스쳐 지나감
+theta = 180도 → cos = -1 → 빛이 표면 뒤쪽에 있음
+```
+
+음수는 표면 뒤쪽의 빛이므로 `saturate()`로 0에서 1 사이로 제한한다.
+
+```hlsl
+float Diffuse = saturate(dot(Normal, ToLightDir));
+```
+
+`saturate(x)`는 다음과 같다.
+
+```text
+x < 0이면 0
+0 <= x <= 1이면 x
+x > 1이면 1
+```
+
+이 단계까지 구현하면 위치를 가진 Point Light가 된다. 아직 거리와 원뿔 범위는 적용하지 않은 상태다.
+
+---
+
+### 5. 거리 감쇠 Distance Attenuation
+
+실제 빛은 광원에서 멀어질수록 약해진다. 이번 구현에서는 이해하기 쉬운 선형 감쇠를 사용했다.
+
+```hlsl
+float DistanceAttenuation =
+    saturate(1.0f - ToLightDistance / LightRange);
+```
+
+`LightRange = 10`일 때 결과는 다음과 같다.
+
+```text
+거리 0  → 1 -  0/10 = 1.0
+거리 2  → 1 -  2/10 = 0.8
+거리 5  → 1 -  5/10 = 0.5
+거리 10 → 1 - 10/10 = 0.0
+거리 15 → 1 - 15/10 = -0.5 → saturate 후 0.0
+```
+
+그래프로 생각하면 광원 위치에서 밝기 1로 시작해 `LightRange`에서 0이 되는 직선이다.
+
+```text
+밝기
+1.0 |\
+    | \
+    |  \
+0.0 |___\________ 거리
+       LightRange
+```
+
+이 식은 배우고 조절하기 쉽지만 물리적으로 정확한 빛은 아니다. 물리적인 빛의 세기는 대체로 거리 제곱에 반비례한다.
+
+```text
+Intensity ∝ 1 / distance²
+```
+
+하지만 거리가 0에 가까울 때 값이 지나치게 커지는 문제와 게임에서 조절하기 어려운 문제가 있으므로, 현재 단계에서는 명확한 최대 범위를 갖는 선형 감쇠를 사용했다.
+
+중요한 점은 거리 감쇠를 Ambient에 곱하지 않는다는 것이다.
+
+```hlsl
+float3 AmbientLight =
+    TextureColor.rgb * AmbientStrength;
+
+float3 DiffuseLight =
+    TextureColor.rgb
+    * LightColor
+    * Diffuse
+    * DiffuseStrength
+    * DistanceAttenuation;
+```
+
+Ambient는 장면 전체의 최소 밝기를 흉내 내는 값이고, 특정 Point Light에서 직접 오는 빛이 아니다. 따라서 이번 구현에서는 Point Light의 거리와 무관하게 유지한다.
+
+---
+
+### 6. Spot Light는 Point Light에 방향과 각도 조건을 추가한 것이다
+
+Point Light는 위치를 중심으로 모든 방향에 빛을 보낸다.
+
+```text
+       ↑
+    ↖  |  ↗
+←──── Light ────→
+    ↙  |  ↘
+       ↓
+```
+
+Spot Light는 특정 방향을 중심으로 한 원뿔 안에만 빛을 보낸다.
+
+```text
+Light ●────────────→ SpotDirection
+       \            /
+        \          /
+         \________/
+          빛의 원뿔
+```
+
+따라서 기존 Point Light 결과에 `SpotAttenuation`을 하나 더 곱하면 된다.
+
+```hlsl
+DiffuseLight *= SpotAttenuation;
+```
+
+`SpotAttenuation`을 구하려면 다음 두 방향을 비교해야 한다.
+
+```text
+SpotDirection
+→ 광원이 실제로 빛을 내보내는 중심 방향
+
+LightToPixelDir
+→ 광원에서 현재 픽셀로 향하는 방향
+```
+
+두 방향이 비슷할수록 픽셀은 원뿔 중앙에 있다.
+
+---
+
+### 7. Pixel→Light와 Light→Pixel의 방향을 구분해야 한다
+
+Diffuse 계산에는 표면에서 광원으로 향하는 방향이 필요하다.
+
+```hlsl
+float3 ToLightDir =
+    normalize(LightPosition - input.worldPosition);
+```
+
+```text
+Pixel ─────→ Light
+      ToLightDir
+```
+
+Spot Light의 각도 계산에는 반대 방향, 즉 광원에서 픽셀로 향하는 방향이 필요하다.
+
+```hlsl
+float3 LightToPixelDir = -ToLightDir;
+```
+
+```text
+Light ─────→ Pixel
+    LightToPixelDir
+```
+
+벡터의 부호를 바꾸면 길이는 같고 방향만 정확히 반대가 된다.
+
+```text
+v  = ( 1,  2,  3)
+-v = (-1, -2, -3)
+```
+
+더 직접적으로 작성할 수도 있다.
+
+```hlsl
+float3 LightToPixelDir =
+    normalize(input.worldPosition - LightPosition);
+```
+
+두 코드는 같은 의미다.
+
+```text
+-(LightPosition - WorldPosition)
+= WorldPosition - LightPosition
+```
+
+---
+
+### 8. 내적으로 원뿔 안에 있는지 판단하는 원리
+
+정규화된 두 방향의 내적은 두 방향 사이 각도의 코사인이다.
+
+```hlsl
+float SpotCos = dot(
+    normalize(SpotDirection),
+    LightToPixelDir);
+```
+
+```text
+SpotCos = cos(theta)
+```
+
+여기서 `theta`는 Spot Light 중심 방향과 광원에서 픽셀로 향하는 방향 사이의 각도다.
+
+```text
+theta =  0도 → SpotCos = 1.000 → 원뿔 정중앙
+theta = 10도 → SpotCos ≈ 0.985
+theta = 20도 → SpotCos ≈ 0.940
+theta = 30도 → SpotCos ≈ 0.866
+theta = 90도 → SpotCos = 0.000 → 완전히 옆쪽
+```
+
+중요한 특징은 각도가 커질수록 코사인은 작아진다는 것이다.
+
+```text
+작은 각도 → 큰 cosine
+큰 각도 → 작은 cosine
+```
+
+따라서 `SpotCos`가 경계 각도의 코사인보다 크면 원뿔 안쪽이다.
+
+```text
+SpotCos >= cos(ConeAngle)
+→ 원뿔 안쪽
+```
+
+CPU에서는 한 번만 각도를 코사인으로 바꾸어 Constant Buffer에 넣는다.
+
+```cpp
+LightData->SpotOuterCos =
+    std::cos(DirectX::XMConvertToRadians(8.0f));
+
+LightData->SpotInnerCos =
+    std::cos(DirectX::XMConvertToRadians(4.0f));
+```
+
+Pixel Shader의 모든 픽셀에서 `cos()`를 반복 계산하지 않고 이미 계산된 경곗값과 내적 결과만 비교하기 위한 방식이다.
+
+---
+
+### 9. Inner Cone과 Outer Cone
+
+경계 하나만 사용하면 빛이 갑자기 1에서 0으로 끊어진다.
+
+```text
+원뿔 안쪽 = 1
+원뿔 바깥 = 0
+```
+
+손전등 가장자리를 부드럽게 만들기 위해 두 개의 경계를 둔다.
+
+```text
+Inner Cone 안쪽
+→ 완전히 밝음
+
+Inner와 Outer 사이
+→ 1에서 0으로 부드럽게 감소
+
+Outer Cone 바깥
+→ 빛 없음
+```
+
+각도로 보면 Inner가 더 작다.
+
+```text
+InnerAngle = 4도
+OuterAngle = 8도
+```
+
+하지만 코사인으로 바꾸면 대소 관계가 반대가 된다.
+
+```text
+cos(4도) ≈ 0.9976
+cos(8도) ≈ 0.9903
+
+SpotInnerCos > SpotOuterCos
+```
+
+이 관계를 놓치면 `smoothstep()` 인수 순서를 반대로 넣기 쉽다.
+
+---
+
+### 10. `step()`과 `smoothstep()`
+
+`step(edge, x)`는 단단한 경계를 만든다.
+
+```hlsl
+float SpotAttenuation = step(SpotOuterCos, SpotCos);
+```
+
+개념적으로 다음과 같다.
+
+```text
+x < edge  → 0
+x >= edge → 1
+```
+
+원뿔의 존재를 처음 검증할 때는 유용하지만 경계가 너무 날카롭다.
+
+이번 구현은 `smoothstep()`을 사용한다.
+
+```hlsl
+float SpotAttenuation = smoothstep(
+    SpotOuterCos,
+    SpotInnerCos,
+    SpotCos);
+```
+
+첫 번째 경계보다 작으면 0, 두 번째 경계보다 크면 1이며 그 사이를 부드럽게 연결한다.
+
+내부적으로 생각할 수 있는 흐름은 다음과 같다.
+
+```text
+t = saturate((x - edge0) / (edge1 - edge0))
+result = t²(3 - 2t)
+```
+
+단순 선형 보간 대신 `t²(3 - 2t)` 형태를 사용해 시작과 끝에서 기울기가 부드럽게 이어진다.
+
+이번 값에서는:
+
+```text
+edge0 = SpotOuterCos = cos(8도)
+edge1 = SpotInnerCos = cos(4도)
+x     = SpotCos
+```
+
+이어야 한다. Outer와 Inner를 반대로 넣으면 의도한 밝기 변화가 뒤집히거나 정의하기 어려운 결과가 나온다.
+
+---
+
+### 11. 최종 조명식의 각 항이 하는 일
+
+현재 직접광은 다음 식으로 계산한다.
+
+```hlsl
+float3 DiffuseLight =
+    TextureColor.rgb
+    * LightColor
+    * Diffuse
+    * DiffuseStrength
+    * DistanceAttenuation
+    * SpotAttenuation;
+```
+
+각 항의 역할은 다음과 같다.
+
+```text
+TextureColor
+→ 물체가 원래 가진 색
+
+LightColor
+→ 조명의 색
+
+Diffuse
+→ 표면이 빛을 얼마나 정면으로 받는가
+
+DiffuseStrength
+→ 직접광 전체 세기 조절
+
+DistanceAttenuation
+→ 광원에서 멀어질수록 감소
+
+SpotAttenuation
+→ 손전등 원뿔 바깥으로 갈수록 감소
+```
+
+곱셈 중 하나라도 0이면 직접광 전체가 0이 된다.
+
+```text
+Diffuse = 0
+→ 표면이 빛 반대쪽을 향함
+
+DistanceAttenuation = 0
+→ LightRange 밖에 있음
+
+SpotAttenuation = 0
+→ 손전등 원뿔 밖에 있음
+```
+
+최종 출력은 직접광과 환경광을 더한다.
+
+```hlsl
+return float4(
+    AmbientLight + DiffuseLight,
+    TextureColor.a);
+```
+
+---
+
+### 12. 카메라를 손전등으로 사용하는 수학적 이유
+
+FPS 손전등의 시작점은 카메라 위치이고 중심 방향은 카메라 Forward다.
+
+```text
+LightPosition  = Camera Position
+SpotDirection = Camera Forward
+```
+
+카메라 View Matrix도 같은 Position과 Forward로 만들어진다.
+
+```cpp
+XMMatrixLookToLH(
+    CameraPosition,
+    GetForwardVector(),
+    GetUpVector());
+```
+
+손전등에도 같은 Forward를 저장한다.
+
+```cpp
+XMStoreFloat3(
+    &LightData->SpotDirection,
+    MainCamera.GetForwardVector());
+```
+
+카메라 위치도 외부에서 읽을 수 있도록 다음 함수를 추가했다.
+
+```cpp
+DirectX::XMVECTOR Camera::GetCameraPosition() const
+{
+    return DirectX::XMLoadFloat3(&Position);
+}
+```
+
+그리고 Light Position에 저장한다.
+
+```cpp
+XMStoreFloat3(
+    &LightData->LightPosition,
+    MainCamera.GetCameraPosition());
+```
+
+Perspective Projection에서 카메라 Forward는 화면 중앙을 통과하는 광선이다. 따라서 같은 Position과 Forward를 사용하는 Spot Light 원뿔의 중심도 항상 화면 중앙에 놓여야 한다.
+
+```text
+마우스 이동
+→ Yaw/Pitch 변경
+→ Camera Forward 변경
+→ View Matrix 변경
+→ SpotDirection도 같은 값으로 변경
+→ 시야와 손전등이 함께 회전
+```
+
+최종 조명을 적용했을 때 물체에서 가장 밝아 보이는 지점은 반드시 화면 중앙일 필요가 없다. Diffuse는 표면 Normal에도 영향을 받기 때문이다. 하지만 `SpotAttenuation`만 흑백으로 출력하면 원뿔 자체의 중심은 화면 중앙과 일치해야 한다.
+
+---
+
+### 13. Light Constant Buffer의 확장과 16바이트 배치
+
+손전등에 필요한 데이터를 추가하면서 Light Buffer는 다음처럼 확장됐다.
+
+```cpp
+struct alignas(16) LightBufferData
+{
+    DirectX::XMFLOAT3 SpotDirection;
+    float AmbientStrength;
+
+    DirectX::XMFLOAT3 LightColor;
+    float DiffuseStrength;
+
+    DirectX::XMFLOAT3 LightPosition;
+    float LightRange;
+
+    float SpotOuterCos;
+    float SpotInnerCos;
+    DirectX::XMFLOAT2 Padding;
+};
+```
+
+HLSL도 같은 순서로 선언한다.
+
+```hlsl
+cbuffer LightBuffer : register(b2)
+{
+    float3 SpotDirection;
+    float AmbientStrength;
+
+    float3 LightColor;
+    float DiffuseStrength;
+
+    float3 LightPosition;
+    float LightRange;
+
+    float SpotOuterCos;
+    float SpotInnerCos;
+    float2 Padding;
+}
+```
+
+16바이트 Register 단위로 보면 다음과 같다.
+
+```text
+0~15바이트
+SpotDirection.xyz + AmbientStrength
+
+16~31바이트
+LightColor.xyz + DiffuseStrength
+
+32~47바이트
+LightPosition.xyz + LightRange
+
+48~63바이트
+SpotOuterCos + SpotInnerCos + Padding.xy
+```
+
+CPU와 HLSL의 이름 자체는 같을 필요가 없지만 자료형, 선언 순서, Offset은 일치해야 한다. 현재 크기는 64바이트이고 16의 배수다.
+
+```cpp
+static_assert(sizeof(LightBufferData) % 16 == 0);
+```
+
+`Padding`은 의미 있는 조명 데이터가 아니라 마지막 16바이트 Register를 완성하여 CPU 구조와 HLSL 배치를 명확하게 맞추기 위한 공간이다.
+
+---
+
+### 14. `float`와 `float3` 오타가 손전등 방향을 망가뜨린 이유
+
+오늘 가장 오래 추적한 문제는 다음 한 줄이었다.
+
+```hlsl
+float ToObjDir = -ToLightDir;
+```
+
+`ToLightDir`은 XYZ 세 성분을 가진 `float3`인데 받는 변수를 `float` 하나로 선언했다.
+
+```text
+float3 방향 벡터
+→ float 변수에 대입
+→ 벡터가 Scalar 하나로 잘림
+→ 완전한 3차원 방향 정보 소실
+```
+
+컴파일러는 이를 오류로 중단하지 않고 암시적 변환을 수행하며 경고만 출력했다.
+
+```text
+warning X3206: implicit truncation of vector type
+```
+
+그 결과 다음 `dot()`은 의도했던 두 `float3` 방향의 내적이 아니게 됐다.
+
+```hlsl
+float SpotCos = dot(
+    normalize(SpotDirection),
+    ToObjDir);
+```
+
+화면에서는 원뿔 중심이 화면 중앙이 아니라 거미의 오른쪽 다리에 나타났다. Camera와 Spot Light가 같은 Forward를 사용하고 있었기 때문에 처음에는 카메라 수학이나 행렬 문제처럼 보였지만, 실제 원인은 방향 벡터를 Scalar로 잘라버린 자료형 오타였다.
+
+수정은 다음과 같다.
+
+```hlsl
+float3 ToObjDir = -ToLightDir;
+```
+
+또는 의미를 더 분명하게 표현한다.
+
+```hlsl
+float3 LightToPixelDir =
+    normalize(input.worldPosition - LightPosition);
+```
+
+이번 문제에서 얻은 중요한 교훈은 HLSL 경고를 가볍게 보면 안 된다는 것이다. HLSL은 `float`, `float2`, `float3`, `float4` 사이의 암시적 변환을 허용하는 경우가 많다. 코드가 컴파일되더라도 좌표, 색상, Normal, 방향 성분이 조용히 사라질 수 있다.
+
+```text
+implicit truncation
+→ 큰 Vector를 작은 Vector나 Scalar로 잘라냄
+
+implicit expansion
+→ Scalar를 여러 Vector 성분으로 확장할 수 있음
+```
+
+특히 위치와 방향을 다루는 코드에서 X3206 경고는 실제 화면 오류로 이어질 가능성이 매우 높으므로 오류처럼 다뤄야 한다.
+
+---
+
+### 15. 조명 문제를 항별로 분리해서 디버깅하는 방법
+
+최종 조명식은 여러 값을 곱한다. 결과가 검게 나오면 한 번에 전체 식을 바라보지 말고 각 항을 화면 색으로 출력해야 한다.
+
+#### Texture 확인
+
+```hlsl
+return DiffuseTexture.Sample(
+    DiffuseSampler,
+    input.texcoord);
+```
+
+Texture가 정상적으로 Bind되고 UV가 맞는지 확인한다.
+
+#### Normal 확인
+
+Normal 범위 `-1~1`을 색상 범위 `0~1`로 바꾼다.
+
+```hlsl
+float3 NormalColor =
+    normalize(input.normal) * 0.5f + 0.5f;
+
+return float4(NormalColor, 1.0f);
+```
+
+#### Diffuse 확인
+
+```hlsl
+return float4(Diffuse, Diffuse, Diffuse, 1.0f);
+```
+
+흰색이면 표면 Normal과 Pixel→Light 방향이 거의 같은 방향이고, 검은색이면 90도 이상 벌어져 있다.
+
+#### Distance Attenuation 확인
+
+```hlsl
+return float4(
+    DistanceAttenuation,
+    DistanceAttenuation,
+    DistanceAttenuation,
+    1.0f);
+```
+
+광원에서 가까울수록 흰색, `LightRange`에 가까울수록 검은색으로 보여야 한다.
+
+#### Spot Attenuation 확인
+
+```hlsl
+return float4(
+    SpotAttenuation,
+    SpotAttenuation,
+    SpotAttenuation,
+    1.0f);
+```
+
+카메라 손전등이라면 흰색 원뿔 중심이 화면 중앙과 일치해야 한다. 이번 `float`/`float3` 문제도 이 출력으로 원뿔이 오른쪽에 치우친 것을 확인하면서 찾았다.
+
+#### `-1~1` 값을 색으로 확인
+
+내적 결과처럼 음수를 포함한 값은 바로 색으로 출력하면 음수가 0으로 잘려 구분하기 어렵다. 다음처럼 변환한다.
+
+```hlsl
+float DebugValue = SpotCos * 0.5f + 0.5f;
+return float4(DebugValue, DebugValue, DebugValue, 1.0f);
+```
+
+```text
+원래 -1 → 화면 0.0 → 검정
+원래  0 → 화면 0.5 → 회색
+원래 +1 → 화면 1.0 → 흰색
+```
+
+이 방식은 내적, Normal 성분, 방향 성분처럼 음수를 가질 수 있는 값을 눈으로 검사할 때 반복해서 사용할 수 있다.
+
+---
+
+### 16. 현재 손전등 구현의 완료 범위와 한계
+
+현재 완료된 내용은 다음과 같다.
+
+```text
+Pixel World Position 전달
+Point Light 방향 계산
+Point Light 거리 계산
+선형 Distance Attenuation
+Spot Direction 내적 판정
+Inner/Outer Cone의 부드러운 경계
+Camera Position과 Light Position 연결
+Camera Forward와 Spot Direction 연결
+Texture × Ambient × Diffuse × Distance × Spot 결합
+각 조명 항을 흑백으로 분리 출력하는 디버깅
+```
+
+아직 구현하지 않은 항목은 다음과 같다.
+
+```text
+바닥과 벽에 비치는 손전등 범위
+Specular Highlight
+Normal Map
+Shadow Map을 이용한 그림자
+안개 속에서 보이는 Volumetric Light
+손전등 흔들림과 밝기 변화
+Monster가 원뿔 안에 있는지 확인하는 CPU 판정
+게임 창이 비활성화됐을 때 마우스 고정 해제
+```
+
+현재 Spot Light는 표면에 도달한 빛만 계산한다. 공기 중에 떠 있는 빛줄기 자체는 그리지 않는다. 손전등 빛줄기가 안개 속에서 보이게 하려면 나중에 Fog 또는 Volumetric Lighting 단계가 필요하다.
+
+또한 거미처럼 굴곡이 심한 모델에서는 Diffuse 때문에 가장 밝은 지점이 손전등 중심과 달라 보일 수 있다. 다음 단계에서 평평한 바닥이나 벽을 추가하면 원뿔의 위치, 크기, 부드러운 경계를 훨씬 명확하게 확인할 수 있다.
+
+---
+
+### 오늘의 핵심 요약
+
+```text
+World Position
+→ 픽셀과 광원의 상대 위치를 계산하는 기준
+
+LightPosition - WorldPosition
+→ Pixel에서 Light로 향하는 벡터
+
+length(vector)
+→ 두 위치 사이의 거리
+
+normalize(vector)
+→ 길이를 1로 만들고 방향만 남김
+
+dot(Normal, ToLightDir)
+→ 표면이 빛을 얼마나 정면으로 받는지 계산
+
+DistanceAttenuation
+→ 광원에서 멀어질수록 직접광 감소
+
+WorldPosition - LightPosition
+→ Light에서 Pixel로 향하는 벡터
+
+dot(SpotDirection, LightToPixelDir)
+→ 픽셀이 손전등 중심에서 얼마나 벗어났는지 계산
+
+Inner/Outer Cos
+→ 완전히 밝은 영역과 빛이 사라지는 영역의 경계
+
+smoothstep
+→ 두 경계 사이를 부드럽게 연결
+
+Camera Position / Forward
+→ FPS 손전등의 위치와 중심 방향
+
+float3 → float 오타
+→ 방향 성분을 잃고도 컴파일될 수 있으므로 HLSL 경고를 확인해야 함
+```
+
+이번 단계의 가장 중요한 수학적 흐름은 **위치의 차이로 방향과 거리를 만들고, 정규화된 방향들의 내적으로 각도를 비교한 뒤, 거리와 각도에 따른 0~1 계수를 직접광에 곱하는 것**이다. 이 원리는 이후 Point Light, Spot Light, 시야 판정, Monster의 손전등 감지, 레이더 방향 표시에도 반복해서 사용된다.

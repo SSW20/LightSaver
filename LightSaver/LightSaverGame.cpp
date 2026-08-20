@@ -89,13 +89,13 @@ bool LightSaverGame::OnInitialize()
 	result = GetGraphics().Device->CreateBuffer(&LightDesc, nullptr, &LightBuffer);
 	if (FAILED(result)) return false;
 
-	ShowCursor(FALSE);
+	//ShowCursor(FALSE);
     return true;
 }
 
 void LightSaverGame::Update(float deltaTime)
-{
-	Rotation += deltaTime;
+{/*
+	Rotation += deltaTime;*/
 	float ForwardInput = 0.f;
 	float RightInput = 0.f;
 	if (GetAsyncKeyState('W') & 0x8000)
@@ -169,10 +169,15 @@ bool LightSaverGame::Render()
 	result = GetGraphics().DeviceContext->Map(LightBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
 	if (FAILED(result)) return false;
 	LightBufferData* LightData = static_cast<LightBufferData*>(MappedResource.pData);
-	DirectX::XMStoreFloat3(&LightData->ToLightDirection, { 0.0f, 0.0f, -1.0f });
-	LightData->AmbientStrength = 0.2f;
+	DirectX::XMStoreFloat3(&LightData->SpotDirection, MainCamera.GetForwardVector());
+	LightData->AmbientStrength = 0.1f;
 	DirectX::XMStoreFloat3(&LightData->LightColor, {1.0f,1.0f,1.0f});
-	LightData->DiffuseStrength = 0.5f;
+	LightData->DiffuseStrength = 0.95f;
+	DirectX::XMStoreFloat3(&LightData->LightPosition, MainCamera.GetCameraPosition());
+	LightData->LightRange = 10.0f;
+	LightData->SpotOuterCos = std::cos(DirectX::XMConvertToRadians(8.0f));
+	LightData->SpotInnerCos = std::cos(DirectX::XMConvertToRadians(4.0f));
+	LightData->Padding ={0.0f, 0.0f };
 	GetGraphics().DeviceContext->Unmap(LightBuffer, 0);
 
 	GetGraphics().DeviceContext->OMSetRenderTargets(1, &GetGraphics().RTV, GetGraphics().DSV);
