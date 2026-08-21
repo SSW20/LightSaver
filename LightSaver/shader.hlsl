@@ -22,8 +22,15 @@ cbuffer LightBuffer : register(b2)
 
     float SpotOuterCos;
     float SpotInnerCos;
-    float2 Padding;
+    float2 LightPadding;
 
+}
+
+cbuffer MaterialBuffer : register(b3)
+{
+    float SpecularStrength;
+    float SpecularPower;
+    float2 MaterialPadding;
 }
 
 Texture2D DiffuseTexture : register(t0);
@@ -80,10 +87,16 @@ float4 PS_Main(PS_INPUT input) : SV_TARGET
 
     float Diffuse = saturate(dot(Normal, ToLightDir));
 
+    float3 HalfDir = normalize(ToLightDir + ToLightDir);
+    float SpecularBase = saturate(dot(HalfDir, Normal));
+    float Specular = pow(SpecularBase, SpecularPower);
+
+    
     float3 AmbientLight = TextureColor.rgb * AmbientStrength;
     float3 DiffuseLight = TextureColor.rgb * LightColor * Diffuse * DiffuseStrength * DistanceAttenuation * SpotAttenuation;
+    float3 SpecularLight = TextureColor.rgb * LightColor * Specular * SpecularStrength * DistanceAttenuation * SpotAttenuation;
 
 
-    return float4(AmbientLight + DiffuseLight, TextureColor.a);
+    return float4(AmbientLight + DiffuseLight + SpecularLight, TextureColor.a);
 
 }

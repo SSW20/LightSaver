@@ -7007,3 +7007,716 @@ float3 → float 오타
 ```
 
 이번 단계의 가장 중요한 수학적 흐름은 **위치의 차이로 방향과 거리를 만들고, 정규화된 방향들의 내적으로 각도를 비교한 뒤, 거리와 각도에 따른 0~1 계수를 직접광에 곱하는 것**이다. 이 원리는 이후 Point Light, Spot Light, 시야 판정, Monster의 손전등 감지, 레이더 방향 표시에도 반복해서 사용된다.
+
+---
+
+## 2026-08-21: Specular, MaterialBuffer, Transform과 RenderObject
+
+이번 단계에서는 한 개의 모델만 그리던 코드에서 벗어나 바닥, 벽, 거미를 각각 다른 위치에 배치하고, 모델의 MTL 재질에 따라 서로 다른 정반사광을 적용할 수 있도록 확장했다. 그 과정에서 Direct3D 11 파이프라인의 상태 설정 방식, Blinn-Phong 정반사 계산, CPU와 HLSL 상수 버퍼의 연결, 리소스와 인스턴스의 차이를 함께 확인했다.
+
+현재 한 프레임의 큰 흐름은 다음과 같다.
+
+```text
+CameraBuffer 갱신
+→ LightBuffer 갱신
+→ 공통 렌더링 상태 설정
+→ RenderObject 목록 순회
+    → ObjectBuffer에 World 기록
+    → Model의 Mesh 목록 순회
+        → MaterialBuffer 갱신
+        → Vertex/Index Buffer 바인딩
+        → Texture/Sampler 바인딩
+        → DrawIndexed
+```
+
+### 1. Direct3D 11은 상태를 설정한 다음 Draw한다
+
+Direct3D 11의 Immediate Context는 현재 렌더링 상태를 기억한다. `IASetVertexBuffers`, `PSSetShaderResources`, `PSSetConstantBuffers` 같은 함수는 그 자리에서 물체를 그리는 함수가 아니다. 뒤에서 실행될 `Draw` 또는 `DrawIndexed`가 사용할 상태를 설정한다.
+
+```cpp
+DeviceContext->IASetVertexBuffers(
+    0,
+    1,
+    &VertexBuffer,
+    &Stride,
+    &Offset);
+
+DeviceContext->IASetIndexBuffer(
+    IndexBuffer,
+    DXGI_FORMAT_R32_UINT,
+    0);
+
+DeviceContext->PSSetShaderResources(
+    0,
+    1,
+    &SRV);
+
+DeviceContext->PSSetSamplers(
+    0,
+    1,
+    &Sampler);
+
+DeviceContext->DrawIndexed(
+    IndexCount,
+    0,
+    0);
+```
+
+위 코드를 문장으로 읽으면 다음과 같다.
+
+```text
+IA의 0번 슬롯에 이 정점 버퍼를 연결한다.
+IA가 사용할 인덱스 버퍼를 연결한다.
+Pixel Shader의 t0에 이 Texture SRV를 연결한다.
+Pixel Shader의 s0에 이 Sampler를 연결한다.
+현재까지 설정된 모든 상태를 사용해 IndexCount만큼 그린다.
+```
+
+#### 같은 설정 함수를 여러 번 호출해도 되는 이유
+
+같은 슬롯에 다른 리소스를 다시 설정하면 가장 마지막 설정이 현재 상태가 된다.
+
+```cpp
+Bind(SpiderMesh);
+Bind(SpiderTexture);
+DrawIndexed(...);
+
+Bind(FloorMesh);
+Bind(FloorTexture);
+DrawIndexed(...);
+```
+
+첫 번째 `DrawIndexed`는 거미 상태를 사용하고, 두 번째 `DrawIndexed`는 바닥 상태를 사용한다. 나중에 상태를 변경해도 이미 앞에서 기록된 Draw 명령의 의미가 바뀌지는 않는다.
+
+```text
+상태 A 설정 → Draw A
+상태 B 설정 → Draw B
+
+Draw A는 상태 A 사용
+Draw B는 상태 B 사용
+```
+
+따라서 Mesh가 달라지면 `IASetVertexBuffers`, `IASetIndexBuffer`를 다시 호출하는 것이 정상이고, Texture가 달라지면 `PSSetShaderResources`도 다시 호출해야 한다. 모든 Texture가 같은 Sampler를 사용한다면 Sampler는 한 번만 설정해도 되지만, 지금 단계에서는 Texture와 함께 반복해서 바인딩해도 기능상 문제는 없다.
+
+#### 같은 슬롯과 다른 슬롯
+
+```cpp
+DeviceContext->PSSetConstantBuffers(
+    2, 1, &LightBuffer);
+
+DeviceContext->PSSetConstantBuffers(
+    3, 1, &MaterialBuffer);
+```
+
+두 호출은 서로 다른 슬롯을 사용한다.
+
+```text
+Pixel Shader b2 → LightBuffer
+Pixel Shader b3 → MaterialBuffer
+```
+
+같은 `b3`에 다른 버퍼를 설정하면 마지막 버퍼가 이전 버퍼를 대체한다. 같은 버퍼를 같은 슬롯에 반복해서 설정하는 것은 오류는 아니지만 중복 호출이다. 버퍼 객체는 한 번 바인딩하고, Mesh를 그리기 전에 `Map/Unmap`으로 내용만 바꿀 수도 있다.
+
+Vertex Shader의 `b2`와 Pixel Shader의 `b2`는 서로 다른 Shader Stage의 슬롯이므로 별개의 상태다.
+
+```text
+VS b2 ≠ PS b2
+```
+
+### 2. Diffuse와 Specular의 질문은 다르다
+
+Diffuse는 다음을 계산한다.
+
+```text
+표면이 빛을 얼마나 정면으로 받고 있는가?
+```
+
+```hlsl
+float Diffuse = saturate(
+    dot(Normal, ToLightDir));
+```
+
+Specular는 다음을 계산한다.
+
+```text
+표면에서 반사된 빛이 카메라로 들어오기 좋은 각도인가?
+```
+
+Diffuse는 카메라가 어디에 있는지 몰라도 계산할 수 있지만, Specular는 관찰자 방향에 따라 하이라이트 위치가 달라지므로 카메라 방향이 필요하다.
+
+### 3. Blinn-Phong Specular에 필요한 방향
+
+한 픽셀의 월드 위치를 `P`라고 하면 다음 방향을 만든다.
+
+```hlsl
+float3 ToLightDir = normalize(
+    LightPosition - P);
+
+float3 ToViewDir = normalize(
+    CameraPosition - P);
+```
+
+```text
+ToLightDir
+→ 픽셀에서 광원을 바라보는 방향
+
+ToViewDir
+→ 픽셀에서 카메라를 바라보는 방향
+```
+
+현재 LightSaver에서는 손전등이 카메라에 붙어 있으므로 다음 두 위치가 같다.
+
+```text
+LightPosition == CameraPosition
+```
+
+따라서 현재 단계에서는 다음처럼 사용할 수 있다.
+
+```hlsl
+float3 ToViewDir = ToLightDir;
+```
+
+하지만 이것은 손전등과 카메라가 같은 위치에 있다는 현재 조건에서만 가능한 단순화다. 나중에 벽의 고정 조명처럼 광원과 카메라가 분리되면 `CameraPosition`을 따로 전달해야 한다.
+
+### 4. Half Direction이 필요한 이유
+
+빛이 카메라 쪽으로 정확하게 반사되려면 표면의 Normal이 빛 방향과 카메라 방향 사이를 적절히 나누어야 한다. Blinn-Phong 방식에서는 빛 방향 `L`과 카메라 방향 `V`의 중간 방향을 구한다.
+
+```hlsl
+float3 HalfDir = normalize(
+    ToLightDir + ToViewDir);
+```
+
+단위 벡터 두 개를 더하면 두 방향 사이를 향하는 벡터가 만들어진다. 다시 정규화하여 길이를 1로 만들면 중간 방향만 남는다.
+
+```text
+L = 빛 방향
+V = 카메라 방향
+H = normalize(L + V)
+```
+
+`H`는 현재 빛과 카메라 배치에서 빛을 카메라로 반사하기 위해 표면이 바라봐야 하는 이상적인 Normal 방향이다.
+
+```hlsl
+float SpecularBase = saturate(
+    dot(Normal, HalfDir));
+```
+
+```text
+Normal == HalfDir
+→ dot = 1
+→ 이상적인 반사 방향
+→ 가장 강한 하이라이트
+
+Normal과 HalfDir이 직각
+→ dot = 0
+→ 하이라이트 없음
+```
+
+Spot Light 원뿔에서도 내적을 사용하지만 목적과 비교 대상이 다르다.
+
+```text
+Spot Light 내적
+SpotDirection vs LightToPixelDirection
+→ 픽셀이 손전등 원뿔 안에 있는가?
+
+Specular 내적
+Normal vs HalfDir
+→ 이 표면이 빛을 카메라로 반사하기 좋은가?
+```
+
+둘 다 내적으로 각도를 비교하지만, Spot 계산은 빛의 범위를 결정하고 Specular 계산은 표면의 반짝임을 결정한다.
+
+### 5. `pow`와 SpecularPower
+
+내적 결과를 그대로 사용하면 방향이 대략 비슷한 넓은 영역까지 밝아져 표면 전체가 하얗게 뜬 것처럼 보일 수 있다. 이를 좁히기 위해 거듭제곱한다.
+
+```hlsl
+float Specular = pow(
+    SpecularBase,
+    SpecularPower);
+```
+
+`SpecularBase`는 `0~1` 범위다. `1`보다 작은 값은 거듭제곱할수록 빠르게 0으로 작아진다.
+
+```text
+pow(1.0, 32) = 1.0
+pow(0.9, 32) ≈ 0.034
+pow(0.8, 32) ≈ 0.0008
+pow(0.5, 32) ≈ 0
+```
+
+따라서 Normal과 Half Direction이 거의 일치하는 좁은 부분만 밝게 남는다.
+
+```text
+SpecularPower가 작음
+→ 넓고 흐릿한 하이라이트
+→ 거친 표면처럼 보임
+
+SpecularPower가 큼
+→ 좁고 날카로운 하이라이트
+→ 매끄러운 표면처럼 보임
+```
+
+`SpecularPower`가 무조건 클수록 사실적인 것은 아니다. 표면 재질에 맞는 값이 필요하다.
+
+```text
+거친 벽        → 낮은 Strength, 낮은 Power
+일반 플라스틱  → 중간 Strength, 중간 Power
+매끄러운 껍질  → 높은 Strength, 높은 Power
+젖은 표면      → 높은 Strength, 매우 날카로운 Power
+```
+
+### 6. SpecularStrength와 SpecularPower의 차이
+
+두 값은 역할이 다르다.
+
+```text
+SpecularStrength
+→ 반짝임 전체의 밝기
+
+SpecularPower
+→ 반짝이는 영역의 넓이와 날카로움
+```
+
+최종 정반사광은 다음과 같이 계산한다.
+
+```hlsl
+float3 SpecularLight =
+    LightColor
+    * Specular
+    * SpecularStrength
+    * DistanceAttenuation
+    * SpotAttenuation;
+```
+
+거리 감쇠와 원뿔 감쇠를 곱하는 이유는 이 하이라이트도 같은 손전등 빛으로 생기기 때문이다. 손전등 범위 밖이나 너무 먼 곳에서 하이라이트만 남으면 안 된다.
+
+### 7. MTL의 `Ks`와 `Ns`
+
+OBJ 모델의 재질 정보는 보통 MTL 파일에 들어 있다.
+
+```mtl
+Ks 0.10 0.10 0.10
+Ns 16.0
+```
+
+```text
+Ks
+→ Specular Color
+→ 반사광의 RGB 색상 또는 세기
+
+Ns
+→ Shininess
+→ 하이라이트의 날카로움
+```
+
+Assimp에서는 다음 키로 읽는다.
+
+```cpp
+aiColor3D SpecularColor(
+    0.2f,
+    0.2f,
+    0.2f);
+
+SourceMaterial->Get(
+    AI_MATKEY_COLOR_SPECULAR,
+    SpecularColor);
+```
+
+현재 `MaterialData`는 Specular RGB 전체가 아니라 `float SpecularStrength` 하나만 저장한다. 그래서 RGB 중 가장 강한 성분을 대표 세기로 사용한다.
+
+```cpp
+MaterialDatas[i].SpecularStrength =
+    std::max(
+        SpecularColor.r,
+        std::max(
+            SpecularColor.g,
+            SpecularColor.b));
+```
+
+예를 들어 다음 값이라면:
+
+```text
+Ks = (0.1, 0.3, 0.2)
+```
+
+```text
+max(0.1, max(0.3, 0.2))
+= 0.3
+```
+
+최종 `SpecularStrength`는 `0.3`이 된다. 이는 학습용 단순화다. 나중에 Material에 `float3 SpecularColor`를 그대로 저장하면 색이 있는 정반사광도 표현할 수 있다.
+
+`Ns`는 다음처럼 읽는다.
+
+```cpp
+float SpecularPower = 32.0f;
+
+if (SourceMaterial->Get(
+        AI_MATKEY_SHININESS,
+        SpecularPower) == AI_SUCCESS)
+{
+    MaterialDatas[i].SpecularPower =
+        std::max(SpecularPower, 1.0f);
+}
+```
+
+0제곱처럼 의도하지 않은 결과를 피하기 위해 최소값을 `1`로 제한했다.
+
+### 8. Windows의 `max` 매크로와 `NOMINMAX`
+
+Windows 헤더는 오래된 호환성을 위해 `min`, `max`라는 매크로를 만들 수 있다. 그러면 표준 라이브러리의 `std::max()`가 전처리기에서 잘못 확장된다.
+
+```cpp
+std::max(SpecularPower, 1.0f)
+```
+
+이 코드의 `max`가 Windows 매크로로 치환되면 `std::` 뒤에 올 수 없는 식이 만들어져 식별자 오류가 발생한다.
+
+프로젝트 전처리기 정의에 다음을 추가했다.
+
+```text
+NOMINMAX
+```
+
+의미는 다음과 같다.
+
+```text
+Windows 헤더가 min/max 매크로를 정의하지 않게 한다.
+```
+
+이제 `std::min`, `std::max`를 정상적으로 사용할 수 있다.
+
+### 9. MaterialBuffer의 CPU/HLSL 대응
+
+재질마다 Specular 값이 다르므로 Pixel Shader에 Material 전용 상수 버퍼를 전달한다.
+
+CPU 구조체:
+
+```cpp
+struct alignas(16) MaterialBufferData
+{
+    float SpecularStrength;
+    float SpecularPower;
+    DirectX::XMFLOAT2 Padding;
+};
+```
+
+HLSL 구조체:
+
+```hlsl
+cbuffer MaterialBuffer : register(b3)
+{
+    float SpecularStrength;
+    float SpecularPower;
+    float2 MaterialPadding;
+}
+```
+
+양쪽 메모리 배치는 정확히 16바이트다.
+
+```text
+SpecularStrength  4바이트
+SpecularPower     4바이트
+Padding           8바이트
+합계             16바이트
+```
+
+상수 버퍼는 16바이트 단위 규칙에 맞춰야 하므로 다음 검사도 둔다.
+
+```cpp
+static_assert(
+    sizeof(MaterialBufferData) % 16 == 0);
+```
+
+### 10. MaterialBuffer는 왜 Mesh마다 갱신하는가
+
+Model 하나가 여러 Mesh를 가질 수 있고, 각 Mesh는 서로 다른 Material을 참조할 수 있다.
+
+```text
+Model
+├── Mesh 0 → Material 0
+├── Mesh 1 → Material 2
+└── Mesh 2 → Material 1
+```
+
+따라서 Model을 한 번 그리는 동안에도 Material이 바뀔 수 있다. 각 Mesh의 Draw 직전에 해당 Material 값을 버퍼에 기록한다.
+
+```text
+Mesh의 MaterialIndex 확인
+→ 해당 MaterialData 선택
+→ MaterialBuffer Map
+→ Strength/Power 기록
+→ Unmap
+→ Texture와 Mesh Bind
+→ DrawIndexed
+```
+
+중요한 점은 MaterialBuffer 갱신이 반드시 해당 Mesh의 `DrawIndexed`보다 먼저 실행되어야 한다는 것이다.
+
+```text
+올바른 순서
+Map → 기록 → Unmap → Draw
+
+잘못된 순서
+Draw → Map → 기록 → Unmap
+```
+
+잘못된 순서에서는 현재 Mesh가 이전 Mesh의 Material 또는 초기화되지 않은 값을 사용한다.
+
+### 11. 테스트 공간: 바닥, 벽, 거미
+
+한 개의 굴곡진 거미 모델만으로는 Spot Light의 원뿔과 Specular 범위를 판단하기 어려웠다. 평평한 표면에서 조명 결과를 확인하기 위해 바닥과 벽 OBJ를 추가했다.
+
+```text
+Assets/Models/Room/
+├── Floor.obj
+├── Wall.obj
+├── Room.mtl
+└── README.md
+```
+
+평평한 바닥과 벽은 다음을 확인하기 쉽다.
+
+```text
+손전등 원뿔이 화면 중앙에 맞는가?
+Inner/Outer Cone 경계가 부드러운가?
+거리 감쇠가 자연스럽게 줄어드는가?
+SpecularPower에 따라 하이라이트 폭이 달라지는가?
+```
+
+### 12. Model 리소스와 Transform 인스턴스의 차이
+
+`Model`은 파일에서 불러온 리소스다.
+
+```text
+Model
+├── Mesh 목록
+├── Vertex/Index Buffer
+├── Texture
+└── MaterialData
+```
+
+`Transform`은 그 모델을 월드의 어디에 어떤 방향과 크기로 놓을지를 나타낸다.
+
+```text
+Transform
+├── Position
+├── Rotation
+└── Scale
+```
+
+같은 Model을 여러 곳에 배치하려면 Model 데이터를 복사하는 것이 아니라 Model 하나를 여러 Transform으로 그리면 된다.
+
+```text
+SpiderModel 한 개
+├── Transform A → 복도 앞의 거미
+├── Transform B → 방 안의 거미
+└── Transform C → 천장의 거미
+```
+
+### 13. World Matrix의 SRT 순서
+
+Transform의 World Matrix는 다음처럼 만든다.
+
+```cpp
+return
+    XMMatrixScaling(...)
+    * XMMatrixRotationRollPitchYaw(...)
+    * XMMatrixTranslation(...);
+```
+
+현재 HLSL은 다음처럼 행 벡터 방식으로 곱한다.
+
+```hlsl
+float4 worldPosition =
+    mul(localPosition, World);
+```
+
+따라서 World를 `S * R * T`로 구성하면 정점에는 다음 순서로 적용된다.
+
+```text
+Local Position
+→ Scale
+→ Rotation
+→ Translation
+→ World Position
+```
+
+먼저 모델 자체의 크기를 바꾸고, 그다음 모델 원점을 기준으로 회전시키고, 마지막에 월드 위치로 이동한다.
+
+### 14. 카메라 이동과 물체 회전의 상대 운동
+
+거미가 회전하는 동안 카메라도 옆으로 이동하면 거미가 회전하지 않는 것처럼 보일 수 있다. 이것은 Transform 오류가 아니라 상대 운동 때문이다.
+
+화면에 나타나는 결과에는 World와 View가 함께 적용된다.
+
+```text
+World Matrix
+→ 거미 자체의 위치와 회전
+
+View Matrix
+→ 카메라 위치와 방향에서 바라본 결과
+```
+
+카메라가 물체 주변을 움직이면 카메라에서 물체를 바라보는 상대 각도가 바뀐다. 그 변화가 물체 회전과 반대 방향이고 속도도 비슷하면 화면에서는 서로 상쇄될 수 있다.
+
+현재 초기 조건을 단순하게 보면:
+
+```text
+거미 회전 속도      ≈ 1 rad/s
+카메라 이동 속도     = 3 unit/s
+카메라와 거미 거리   ≈ 3 unit
+시점의 각속도        ≈ 속도 / 거리
+                     ≈ 3 / 3
+                     ≈ 1 rad/s
+```
+
+따라서 특정 방향으로 Strafe할 때 거미의 회전과 시점 변화가 거의 상쇄되어 같은 면이 계속 보이는 것처럼 느껴질 수 있다. 반대 방향으로 이동하면 두 변화가 더해져 더 빠르게 회전하는 것처럼 보일 수도 있다.
+
+### 15. RenderObject가 필요한 이유
+
+모델 리소스와 월드 배치 정보를 묶기 위해 `RenderObject`를 추가했다.
+
+```cpp
+struct RenderObject
+{
+    Model* ModelSet = nullptr;
+    Transform ModelWorldTransform;
+};
+```
+
+`Model*`은 Model을 복사하거나 소유하지 않고 이미 로드된 리소스를 참조한다. `Model` 내부에는 `unique_ptr<Mesh>` 같은 복사할 수 없는 소유 데이터가 있으므로 인스턴스마다 Model 전체를 복사하면 안 된다.
+
+```text
+Model*
+→ 무엇을 그릴 것인가?
+
+Transform
+→ 어디에 어떻게 그릴 것인가?
+```
+
+RenderObject 목록을 순회하면 물체 수가 늘어나도 Render 함수에 개별 Draw 호출을 계속 추가할 필요가 없다.
+
+```cpp
+for (RenderObject* RenderObj : RenderObjects)
+{
+    if (RenderObj == nullptr)
+    {
+        continue;
+    }
+
+    DrawModel(
+        *RenderObj->ModelSet,
+        RenderObj->ModelWorldTransform
+            .GetWorldMatrix());
+}
+```
+
+### 16. RenderObject는 최종 Actor가 아니다
+
+현재 RenderObject는 Model과 Transform을 묶어 여러 물체를 반복문으로 그리기 위한 중간 구조다. 최종 게임 구조에서는 게임 객체와 렌더링 제출 정보를 분리한다.
+
+```text
+World
+└── Actor 목록
+    ├── Transform
+    └── Component 목록
+        ├── MeshComponent
+        ├── CollisionComponent
+        ├── AudioComponent
+        └── MonsterComponent
+```
+
+모든 Actor가 화면에 보이는 것은 아니므로 Actor가 Model을 직접 가지게 만들지 않는다.
+
+```text
+보이는 Actor
+→ MeshComponent 보유
+
+보이지 않는 Actor
+→ Trigger, Spawn Point, Game Rule 등
+→ MeshComponent가 없을 수 있음
+```
+
+앞으로 `MeshComponent`가 Model을 참조하고, Actor의 Transform과 결합하여 Renderer에 RenderObject 정보를 제공하게 된다.
+
+### 17. 다음 구조 단계
+
+다음 단계의 구현 순서는 다음과 같다.
+
+```text
+Actor 기본 클래스
+→ Actor가 Transform 보유
+→ Component 기본 클래스
+→ Actor가 Component 목록 보유
+→ MeshComponent가 Model 참조
+→ World가 Actor 목록 보유
+→ Renderer가 MeshComponent를 수집해 Draw
+```
+
+Component에는 Tick 여부를 둘 수 있다.
+
+```text
+MeshComponent
+→ 매 프레임 Update할 필요 없음
+
+MonsterComponent
+→ AI 상태와 이동을 위해 Tick 필요
+
+AudioComponent
+→ 위치 또는 재생 상태에 따라 선택적으로 Tick
+```
+
+따라서 모든 객체에 무조건 Update와 Render를 넣는 구조를 피하고, 필요한 기능만 Component로 조합할 수 있다.
+
+---
+
+### 오늘의 핵심 요약
+
+```text
+Direct3D 11 상태 함수
+→ 다음 Draw가 사용할 파이프라인 상태를 설정
+
+같은 슬롯 재설정
+→ 마지막 설정이 현재 상태가 됨
+
+DrawIndexed
+→ 호출 시점의 Mesh, Texture, Shader, Buffer 상태를 사용
+
+Diffuse
+→ 표면이 빛을 얼마나 정면으로 받는지 계산
+
+Specular
+→ 표면이 빛을 카메라로 반사하기 좋은지 계산
+
+HalfDir
+→ 빛과 카메라 사이의 이상적인 Normal 방향
+
+pow(Base, Power)
+→ 1에 가까운 값만 남겨 하이라이트 폭을 조절
+
+MTL Ks
+→ Specular 색상/세기
+
+MTL Ns
+→ Specular 날카로움
+
+MaterialBuffer b3
+→ Mesh마다 다른 재질 값을 Pixel Shader에 전달
+
+Transform
+→ Position, Rotation, Scale로 World Matrix 생성
+
+Model
+→ 정점, 인덱스, 텍스처, 재질을 가진 리소스
+
+RenderObject
+→ Model 리소스와 월드 배치를 연결한 현재 렌더링 인스턴스
+
+Actor/Component
+→ 앞으로 게임 로직과 렌더링 기능을 분리할 최종 방향
+```
+
+이번 단계의 핵심은 **Draw는 그 순간 설정된 파이프라인 상태를 사용하고, 각 Mesh의 World와 Material을 Draw 전에 갱신해야 한다는 것**이다. 이를 이해하면 이후 Renderer가 여러 Actor와 MeshComponent를 모아 그리는 구조도 같은 원리로 확장할 수 있다.

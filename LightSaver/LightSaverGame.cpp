@@ -57,10 +57,27 @@ bool LightSaverGame::OnInitialize()
 	ViewPort.MinDepth = 0.0f;
 
 
-	if (!ModelSet.Initialize(GetGraphics().Device, "Assets/Models/Spider/spider.obj"))
-	{
-		return false;
-	}
+	if (!SpiderModel.Initialize(GetGraphics().Device, "Assets/Models/Spider/spider.obj")) return false;
+	if (!WallModel.Initialize(GetGraphics().Device, "Assets/Models/Room/Wall.obj")) return false;
+	if (!FloorModel.Initialize(GetGraphics().Device, "Assets/Models/Room/Floor.obj")) return false;
+
+	Transform SpiderTransform, FloorTransform, WallTransform;
+	SpiderTransform.Scale = { 0.01f, 0.01f, 0.01f };
+	WallTransform.Position = { 0.0f, -0.45f, 4.0f };
+	WallTransform.Scale = { 12.0f, 1.0f, 12.0f };
+	FloorTransform.Position = { 0.0f, 1.8f, 10.0f };
+	FloorTransform.Scale = { 12.0f, 4.5f, 1.0f };
+
+	SpiderRenderObj.ModelSet = &SpiderModel;
+	SpiderRenderObj.ModelWorldTransform = SpiderTransform;
+	WallRenderObj.ModelSet = &WallModel;
+	WallRenderObj.ModelWorldTransform = FloorTransform;
+	FloorRenderObj.ModelSet = &FloorModel;
+	FloorRenderObj.ModelWorldTransform = WallTransform;
+
+	RenderObjects.push_back(&SpiderRenderObj);
+	RenderObjects.push_back(&FloorRenderObj);
+	RenderObjects.push_back(&WallRenderObj);
 
 	D3D11_BUFFER_DESC CameraDesc = {};
 	CameraDesc.ByteWidth = sizeof(CameraBufferData);
@@ -89,13 +106,26 @@ bool LightSaverGame::OnInitialize()
 	result = GetGraphics().Device->CreateBuffer(&LightDesc, nullptr, &LightBuffer);
 	if (FAILED(result)) return false;
 
-	//ShowCursor(FALSE);
-    return true;
+	D3D11_BUFFER_DESC MaterialDesc = {};
+	MaterialDesc.ByteWidth = sizeof(MaterialBufferData);
+	MaterialDesc.Usage = D3D11_USAGE_DYNAMIC;
+	MaterialDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	MaterialDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+	result = GetGraphics().Device->CreateBuffer(&MaterialDesc, nullptr, &MaterialBuffer);
+	if (FAILED(result)) return false;
+
+	ShowCursor(FALSE);
+	return true;
 }
 
 void LightSaverGame::Update(float deltaTime)
-{/*
-	Rotation += deltaTime;*/
+{
+	Rotation += deltaTime;
+	SpiderRenderObj.ModelWorldTransform.Rotation.y = Rotation;
+
+	if (GetForegroundWindow() != GetWindow().GetHWND()) return;
+
 	float ForwardInput = 0.f;
 	float RightInput = 0.f;
 	if (GetAsyncKeyState('W') & 0x8000)
@@ -148,7 +178,6 @@ bool LightSaverGame::Render()
 {
 	HRESULT result;
 
-	DirectX::XMMATRIX World = DirectX::XMMatrixScaling(0.01f, 0.01f, 0.01f) * DirectX::XMMatrixRotationY(Rotation);
 
 	D3D11_MAPPED_SUBRESOURCE MappedResource = {};
 	result = GetGraphics().DeviceContext->Map(CameraBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
@@ -160,24 +189,18 @@ bool LightSaverGame::Render()
 	DirectX::XMStoreFloat4x4(&CameraData->Projection, DirectX::XMMatrixTranspose(MainCamera.GetProjectionMatrix()));
 	GetGraphics().DeviceContext->Unmap(CameraBuffer, 0);
 
-	result = GetGraphics().DeviceContext->Map(ObjectBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
-	if (FAILED(result)) return false;
-	ObjectBufferData* ObjectData = static_cast<ObjectBufferData*>(MappedResource.pData);
-	DirectX::XMStoreFloat4x4(&ObjectData->World, DirectX::XMMatrixTranspose(World));
-	GetGraphics().DeviceContext->Unmap(ObjectBuffer, 0);
-
 	result = GetGraphics().DeviceContext->Map(LightBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
 	if (FAILED(result)) return false;
 	LightBufferData* LightData = static_cast<LightBufferData*>(MappedResource.pData);
 	DirectX::XMStoreFloat3(&LightData->SpotDirection, MainCamera.GetForwardVector());
 	LightData->AmbientStrength = 0.1f;
-	DirectX::XMStoreFloat3(&LightData->LightColor, {1.0f,1.0f,1.0f});
+	DirectX::XMStoreFloat3(&LightData->LightColor, { 1.0f,1.0f,1.0f });
 	LightData->DiffuseStrength = 0.95f;
 	DirectX::XMStoreFloat3(&LightData->LightPosition, MainCamera.GetCameraPosition());
-	LightData->LightRange = 10.0f;
-	LightData->SpotOuterCos = std::cos(DirectX::XMConvertToRadians(8.0f));
-	LightData->SpotInnerCos = std::cos(DirectX::XMConvertToRadians(4.0f));
-	LightData->Padding ={0.0f, 0.0f };
+	LightData->LightRange = 30.0f;
+	LightData->SpotOuterCos = std::cos(DirectX::XMConvertToRadians(30.0f));
+	LightData->SpotInnerCos = std::cos(DirectX::XMConvertToRadians(7.0f));
+	LightData->Padding = { 0.0f, 0.0f };
 	GetGraphics().DeviceContext->Unmap(LightBuffer, 0);
 
 	GetGraphics().DeviceContext->OMSetRenderTargets(1, &GetGraphics().RTV, GetGraphics().DSV);
@@ -191,9 +214,27 @@ bool LightSaverGame::Render()
 	GetGraphics().DeviceContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
 	ShaderSet.Bind(GetGraphics().DeviceContext);
-	ModelSet.Draw(GetGraphics().DeviceContext);
 
-    return true;
+	for (RenderObject* RenderObj : RenderObjects)
+	{
+		if (RenderObj == nullptr) continue;
+		if (!DrawModel(*RenderObj->ModelSet, RenderObj->ModelWorldTransform.GetWorldMatrix())) return false;
+	}
+
+	return true;
+}
+
+bool LightSaverGame::DrawModel(Model& ModelSet, const DirectX::XMMATRIX& World)
+{
+	D3D11_MAPPED_SUBRESOURCE MappedResource = {};
+	HRESULT result;
+	result = GetGraphics().DeviceContext->Map(ObjectBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
+	if (FAILED(result)) return false;
+	ObjectBufferData* ObjectData = static_cast<ObjectBufferData*>(MappedResource.pData);
+	DirectX::XMStoreFloat4x4(&ObjectData->World, DirectX::XMMatrixTranspose(World));
+	GetGraphics().DeviceContext->Unmap(ObjectBuffer, 0);
+	ModelSet.Draw(GetGraphics().DeviceContext, MaterialBuffer);
+	return true;
 }
 
 LightSaverGame::~LightSaverGame()
@@ -201,4 +242,5 @@ LightSaverGame::~LightSaverGame()
 	if (ObjectBuffer != nullptr) ObjectBuffer->Release();
 	if (CameraBuffer != nullptr) CameraBuffer->Release();
 	if (LightBuffer != nullptr) LightBuffer->Release();
+	if (MaterialBuffer != nullptr) MaterialBuffer->Release();
 }

@@ -7,6 +7,8 @@
 #include "Mesh.h"
 #include "Texture.h"
 #include "Model.h"
+#include "Transform.h"
+#include "RenderObject.h"
 class Shader;
 
 struct alignas(16) CameraBufferData
@@ -47,6 +49,7 @@ public:
 	virtual void Update(float deltaTime) override;
 	virtual bool Render() override;
 
+	bool DrawModel(Model& ModelSet,const DirectX::XMMATRIX& World);
 	~LightSaverGame() override;
 
 private:
@@ -55,14 +58,17 @@ private:
 	ID3D11Buffer* CameraBuffer = nullptr;
 	ID3D11Buffer* ObjectBuffer = nullptr;
 	ID3D11Buffer* LightBuffer = nullptr;
+	ID3D11Buffer* MaterialBuffer = nullptr;
 	float Rotation = 0.0f;
 	float clearColor[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
-	Camera MainCamera;
 	float CameraSpeed = 3.0f;
 	// 픽셀당 회전할 라디안 값
 	float MouseSpeed = DirectX::XMConvertToRadians(0.1f);
+	Camera MainCamera;
 	Shader ShaderSet;
-	Mesh MeshSet;
-	Texture TextureSet;
-	Model ModelSet;
+	Model SpiderModel; 
+	Model FloorModel; 
+	Model WallModel;
+	RenderObject SpiderRenderObj, FloorRenderObj, WallRenderObj;
+	std::vector<RenderObject*> RenderObjects;
 };

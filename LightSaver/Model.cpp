@@ -3,6 +3,7 @@
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 #include <filesystem>
+#include <algorithm>
 
 
 bool Model::Initialize(ID3D11Device* Device,  const std::string& FilePath)
@@ -84,16 +85,28 @@ bool Model::Initialize(ID3D11Device* Device,  const std::string& FilePath)
 		{
 			NewTexture->InitializeByColor(Device, 255,255,255,255);
 			MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
-			continue;
 		}
 
 		aiString TexturePath;
-		if (SourceMaterial->GetTexture(aiTextureType_DIFFUSE, 0, &TexturePath) != AI_SUCCESS) continue;
+		if (SourceMaterial->GetTexture(aiTextureType_DIFFUSE, 0, &TexturePath) == AI_SUCCESS) 
+		{
+			std::filesystem::path FullTexturePath = ModelPath.parent_path() / TexturePath.C_Str();
 
-		std::filesystem::path FullTexturePath = ModelPath.parent_path() / TexturePath.C_Str();
-		
-		if (!NewTexture->Initialize(Device, FullTexturePath.c_str())) return false;
-		MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
+			if (!NewTexture->Initialize(Device, FullTexturePath.c_str())) return false;
+			MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
+		}
+
+		aiColor3D SpecularColor(0.2f, 0.2f, 0.2f);
+		if (SourceMaterial->Get(AI_MATKEY_COLOR_SPECULAR, SpecularColor) == AI_SUCCESS)
+		{
+			MaterialDatas[i].SpecularStrength = std::max(SpecularColor.r, std::max(SpecularColor.g, SpecularColor.b));
+		}
+		float SpecularPower = 32.0f;
+		if (SourceMaterial->Get(AI_MATKEY_SHININESS, SpecularPower) == AI_SUCCESS)
+		{
+			MaterialDatas[i].SpecularPower = std::max(SpecularPower, 1.0f);
+		}
+
 	}
 
 
@@ -113,12 +126,23 @@ bool Model::Initialize(ID3D11Device* Device,  const std::string& FilePath)
 	return true;
 }
 
-void Model::Draw(ID3D11DeviceContext* DeviceContext)
+void Model::Draw(ID3D11DeviceContext* DeviceContext, ID3D11Buffer* MaterialBuffer)
 {
 	for (const auto& ModelData : ModelDatas)
 	{
 		ModelData.MeshData->Bind(DeviceContext);
 		MaterialDatas[ModelData.MaterialIndex].DiffuseTexture->Bind(DeviceContext);
+
+		DeviceContext->PSSetConstantBuffers(3, 1, &MaterialBuffer);
+		D3D11_MAPPED_SUBRESOURCE MappedResource = {};
+		DeviceContext->Map(MaterialBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
+		MaterialBufferData* MaterialData = static_cast<MaterialBufferData*>(MappedResource.pData);
+		MaterialData->SpecularPower = MaterialDatas[ModelData.MaterialIndex].SpecularPower;
+		MaterialData->SpecularStrength = MaterialDatas[ModelData.MaterialIndex].SpecularStrength;
+		MaterialData->Padding = { 0.0f,0.0f};
+		DeviceContext->Unmap(MaterialBuffer, 0);
+
+
 		DeviceContext->DrawIndexed(ModelData.MeshData->GetIndexCount(), 0, 0);
 
 	}
