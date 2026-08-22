@@ -1,49 +1,14 @@
 #include "LightSaverGame.h"
 #include "Shader.h"
+#include "Actor.h"
+#include "MeshComponent.h"
+#include "Component.h"
 #include <cmath>
 #include <vector>
 bool LightSaverGame::OnInitialize()
 {
-
-	//std::vector<Vertex> vertices;
-	//std::vector<UINT> indices;
-
-	//auto AddFace = [&](const DirectX::XMFLOAT3& v0, const DirectX::XMFLOAT3& v1, const DirectX::XMFLOAT3& v2, const DirectX::XMFLOAT3& v3)
-	//	{
-	//		UINT baseIndex = vertices.size();
-
-	//		vertices.push_back({ v0.x, v0.y, v0.z, 0.0f, 1.0f });
-	//		vertices.push_back({ v1.x, v1.y, v1.z, 0.0f, 0.0f });
-	//		vertices.push_back({ v2.x, v2.y, v2.z, 1.0f, 0.0f });
-	//		vertices.push_back({ v3.x, v3.y, v3.z, 1.0f, 1.0f });
-
-	//		indices.push_back(baseIndex + 0);
-	//		indices.push_back(baseIndex + 1);
-	//		indices.push_back(baseIndex + 2);
-	//		indices.push_back(baseIndex + 0);
-	//		indices.push_back(baseIndex + 2);
-	//		indices.push_back(baseIndex + 3);
-	//	};
-
-	//// 앞면
-	//AddFace({ -0.5f, -0.5f, -0.5f }, { -0.5f, 0.5f, -0.5f }, { 0.5f, 0.5f, -0.5f }, { 0.5f, -0.5f, -0.5f });
-	//// 뒷면
-	//AddFace({ 0.5f, -0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, { -0.5f, 0.5f, 0.5f }, { -0.5f, -0.5f, 0.5f });
-	//// 왼쪽
-	//AddFace({ -0.5f, -0.5f, 0.5f }, { -0.5f, 0.5f, 0.5f }, { -0.5f, 0.5f, -0.5f }, { -0.5f, -0.5f, -0.5f });
-	//// 오른쪽
-	//AddFace({ 0.5f, -0.5f, -0.5f }, { 0.5f, 0.5f, -0.5f }, { 0.5f, 0.5f, 0.5f }, { 0.5f, -0.5f, 0.5f });
-	//// 아래
-	//AddFace({ -0.5f, -0.5f, 0.5f }, { -0.5f, -0.5f, -0.5f }, { 0.5f, -0.5f, -0.5f }, { 0.5f, -0.5f, 0.5f });
-	//// 위
-	//AddFace({ -0.5f, 0.5f, -0.5f }, { -0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, 0.5f }, { 0.5f, 0.5f, -0.5f });
-
 	HRESULT result;
 
-	/*if (!MeshSet.Initialize(GetGraphics().Device, vertices.data(), 24, indices.data(), 36))
-	{
-		return false;
-	}*/
 
 	if (!ShaderSet.Initialize(GetGraphics().Device, L"shader.hlsl"))
 	{
@@ -61,23 +26,23 @@ bool LightSaverGame::OnInitialize()
 	if (!WallModel.Initialize(GetGraphics().Device, "Assets/Models/Room/Wall.obj")) return false;
 	if (!FloorModel.Initialize(GetGraphics().Device, "Assets/Models/Room/Floor.obj")) return false;
 
-	Transform SpiderTransform, FloorTransform, WallTransform;
-	SpiderTransform.Scale = { 0.01f, 0.01f, 0.01f };
-	WallTransform.Position = { 0.0f, -0.45f, 4.0f };
-	WallTransform.Scale = { 12.0f, 1.0f, 12.0f };
-	FloorTransform.Position = { 0.0f, 1.8f, 10.0f };
-	FloorTransform.Scale = { 12.0f, 4.5f, 1.0f };
+	Transform FloorTransform, WallTransform;
+	FloorTransform.Position = { 0.0f, -0.45f, 4.0f };
+	FloorTransform.Scale = { 12.0f, 1.0f, 12.0f };
+	WallTransform.Position = { 0.0f, 1.8f, 10.0f };
+	WallTransform.Scale = { 12.0f, 4.5f, 1.0f };
 
-	SpiderRenderObj.ModelSet = &SpiderModel;
-	SpiderRenderObj.ModelWorldTransform = SpiderTransform;
 	WallRenderObj.ModelSet = &WallModel;
-	WallRenderObj.ModelWorldTransform = FloorTransform;
+	WallRenderObj.ModelWorldTransform = WallTransform;
 	FloorRenderObj.ModelSet = &FloorModel;
-	FloorRenderObj.ModelWorldTransform = WallTransform;
+	FloorRenderObj.ModelWorldTransform = FloorTransform;
 
-	RenderObjects.push_back(&SpiderRenderObj);
 	RenderObjects.push_back(&FloorRenderObj);
 	RenderObjects.push_back(&WallRenderObj);
+
+	SpiderActor = GameWorld.SpawnActor<Actor>();
+	SpiderActor->GetActorTransform().Scale = { 0.01f, 0.01f, 0.01f };
+	SpiderMeshComponent = SpiderActor->AddComponent<MeshComponent>(&SpiderModel);
 
 	D3D11_BUFFER_DESC CameraDesc = {};
 	CameraDesc.ByteWidth = sizeof(CameraBufferData);
@@ -122,7 +87,10 @@ bool LightSaverGame::OnInitialize()
 void LightSaverGame::Update(float deltaTime)
 {
 	Rotation += deltaTime;
-	SpiderRenderObj.ModelWorldTransform.Rotation.y = Rotation;
+	if (SpiderActor != nullptr)
+	{
+		SpiderActor->GetActorTransform().Rotation.y = Rotation;
+	}
 
 	if (GetForegroundWindow() != GetWindow().GetHWND()) return;
 
@@ -172,6 +140,8 @@ void LightSaverGame::Update(float deltaTime)
 
 	MainCamera.AddRotation(DeltaX * MouseSpeed, -DeltaY * MouseSpeed);
 	SetCursorPos(Center.x, Center.y);
+
+	GameWorld.Update(deltaTime);
 }
 
 bool LightSaverGame::Render()
@@ -220,7 +190,15 @@ bool LightSaverGame::Render()
 		if (RenderObj == nullptr) continue;
 		if (!DrawModel(*RenderObj->ModelSet, RenderObj->ModelWorldTransform.GetWorldMatrix())) return false;
 	}
-
+	if (SpiderActor != nullptr &&
+		SpiderMeshComponent != nullptr &&
+		SpiderMeshComponent->GetModel() != nullptr)
+	{
+		if (!DrawModel(*SpiderMeshComponent->GetModel(),SpiderActor->GetActorTransform().GetWorldMatrix()))
+		{
+			return false;
+		}
+	}
 	return true;
 }
 

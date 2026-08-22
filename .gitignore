@@ -14,3 +14,4 @@ vcpkg_installed/
 *.log
 *.tlog
 *.recipe
+*.aps

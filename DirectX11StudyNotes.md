@@ -7720,3 +7720,525 @@ Actor/Component
 ```
 
 이번 단계의 핵심은 **Draw는 그 순간 설정된 파이프라인 상태를 사용하고, 각 Mesh의 World와 Material을 Draw 전에 갱신해야 한다는 것**이다. 이를 이해하면 이후 Renderer가 여러 Actor와 MeshComponent를 모아 그리는 구조도 같은 원리로 확장할 수 있다.
+
+---
+
+## 2026-08-22: Actor/Component/World와 C++ 분할 컴파일
+
+### 1. 이번에 만든 구조
+
+이번 단계에서는 기존의 `RenderObject`만으로 물체를 관리하던 구조에서 `World → Actor → Component` 구조로 이동하기 시작했다.
+
+```text
+LightSaverGame
+└── World
+    └── Actor
+        ├── Transform
+        └── Component 목록
+            └── MeshComponent
+                └── Model을 참조
+```
+
+각 클래스의 책임은 다음과 같다.
+
+```text
+World
+→ 게임 안에 존재하는 Actor들을 소유하고 Update한다.
+
+Actor
+→ 하나의 게임 객체를 나타낸다.
+→ 자신의 위치, 회전, 크기인 Transform을 가진다.
+→ 필요한 기능을 Component로 가진다.
+
+Component
+→ Actor에 붙는 하나의 기능이다.
+→ 앞으로 이동, 충돌, 소리, 몬스터 AI 같은 기능을 만들 수 있다.
+
+MeshComponent
+→ Actor를 화면에 그릴 때 사용할 Model을 참조한다.
+→ Model의 소유자는 아니므로 현재는 일반 포인터로 참조한다.
+```
+
+현재 거미는 다음 흐름으로 생성된다.
+
+```cpp
+SpiderActor = GameWorld.SpawnActor<Actor>();
+SpiderActor->GetActorTransform().Scale = { 0.01f, 0.01f, 0.01f };
+SpiderMeshComponent = SpiderActor->AddComponent<MeshComponent>(&SpiderModel);
+```
+
+이를 문장으로 읽으면 다음과 같다.
+
+```text
+World에게 Actor 한 개를 생성해 달라고 요청한다.
+→ 생성된 Actor의 크기를 정한다.
+→ 그 Actor에 MeshComponent를 붙인다.
+→ MeshComponent가 SpiderModel을 가리키게 한다.
+```
+
+`World`와 `Actor`는 `unique_ptr`로 내부 객체를 소유한다.
+
+```text
+World 파괴
+→ World가 가진 unique_ptr<Actor> 파괴
+→ Actor 자동 파괴
+→ Actor가 가진 unique_ptr<Component> 파괴
+→ Component 자동 파괴
+```
+
+따라서 직접 `delete`를 반복하지 않아도 소유 관계를 따라 자동으로 정리된다.
+
+### 2. CPP 파일은 서로 내용을 직접 보지 못한다
+
+C++ 프로젝트의 여러 CPP는 한 권의 책처럼 한꺼번에 컴파일되지 않는다. 각각 독립적으로 컴파일된다.
+
+```text
+LightSaverGame.cpp → LightSaverGame.obj
+World.cpp          → World.obj
+Actor.cpp          → Actor.obj
+Component.cpp      → Component.obj
+```
+
+이때 `LightSaverGame.cpp`를 컴파일하는 컴파일러는 `World.cpp`의 내용을 직접 볼 수 없다.
+
+```cpp
+// LightSaverGame.cpp
+#include "World.h"
+```
+
+`#include`는 헤더의 내용을 현재 CPP에 복사해서 보여주는 것에 가깝다. 따라서 컴파일러가 보는 것은 다음과 같다.
+
+```text
+World.h의 내용
++
+LightSaverGame.cpp의 내용
+```
+
+`World.cpp`의 내용까지 자동으로 합쳐서 보는 것은 아니다.
+
+### 3. 컴파일러와 링커는 하는 일이 다르다
+
+전체 빌드는 크게 두 단계로 나눌 수 있다.
+
+```text
+1. 컴파일
+CPP의 C++ 코드를 기계어가 들어 있는 OBJ로 바꾼다.
+
+2. 링크
+여러 OBJ에 이미 만들어진 함수들을 서로 연결하여 EXE를 만든다.
+```
+
+쉽게 비유하면 다음과 같다.
+
+```text
+컴파일러 = 설계도를 읽고 실제 부품을 만드는 공장
+링커     = 이미 만들어진 부품들을 연결하는 조립 담당자
+```
+
+링커는 없는 C++ 함수를 새로 컴파일하지 않는다. 한 OBJ가 요구하는 완성된 함수가 다른 OBJ에 있는지 찾아 연결할 뿐이다.
+
+### 4. 선언과 정의의 차이
+
+선언은 함수가 존재한다는 사실과 사용 방법을 알려준다.
+
+```cpp
+void World::Update(float DeltaTime);
+```
+
+정의는 함수가 실제로 무엇을 하는지 알려준다.
+
+```cpp
+void World::Update(float DeltaTime)
+{
+    for (...)
+    {
+        Actors[i]->Update(DeltaTime);
+    }
+}
+```
+
+일반 함수는 헤더에서 선언만 보고 호출할 수 있다.
+
+```text
+LightSaverGame.cpp를 컴파일
+→ World::Update가 존재한다는 선언을 봄
+→ 실제 함수는 다른 OBJ에 있을 것이라고 기록함
+
+World.cpp를 컴파일
+→ World::Update의 본문을 봄
+→ World.obj에 실제 기계어를 만듦
+
+링크
+→ LightSaverGame.obj의 요청을 World.obj의 함수와 연결
+```
+
+### 5. 불완전 타입이란 무엇인가
+
+다음 코드는 `Actor`의 전방 선언이다.
+
+```cpp
+class Actor;
+```
+
+이 상태에서 컴파일러가 아는 내용은 하나뿐이다.
+
+```text
+Actor라는 이름의 클래스가 존재한다.
+```
+
+아직 모르는 내용은 다음과 같다.
+
+```text
+Actor의 크기
+Actor의 멤버
+Actor의 부모 클래스
+Actor의 소멸 방법
+```
+
+이처럼 이름과 존재만 알고 전체 구조는 모르는 타입을 불완전 타입이라고 한다.
+
+일반 포인터는 주소만 저장하므로 불완전 타입도 가리킬 수 있다.
+
+```cpp
+class Actor;
+Actor* Owner = nullptr;  // 가능
+```
+
+하지만 실제 객체를 직접 멤버로 가지려면 크기를 알아야 한다.
+
+```cpp
+class Actor;
+Actor Value;             // 불가능: Actor의 크기를 모름
+```
+
+### 6. 소멸자를 CPP에서 정의했던 이유
+
+이전 구조가 다음과 같았다고 생각해 보자.
+
+```cpp
+// World.h
+class Actor;
+
+class World
+{
+private:
+    std::vector<std::unique_ptr<Actor>> Actors;
+
+public:
+    ~World();
+};
+```
+
+`unique_ptr<Actor>`는 주소를 보관하는 동안에는 불완전한 `Actor`를 사용할 수 있다. 하지만 `World`가 파괴될 때는 실제로 `Actor`를 삭제해야 한다.
+
+```text
+World 파괴
+→ vector 파괴
+→ unique_ptr<Actor> 파괴
+→ Actor 삭제
+```
+
+따라서 `World`의 소멸 코드를 만드는 순간에는 `Actor`의 전체 정의가 필요하다.
+
+헤더에서 다음처럼 정의하면 헤더를 포함한 CPP가 소멸자를 만들려고 할 수 있다.
+
+```cpp
+~World() = default;
+```
+
+하지만 그 위치에서 `Actor`가 전방 선언만 되어 있다면 `Actor`를 완전히 삭제하는 코드를 만들 수 없다.
+
+그래서 헤더에는 소멸자가 존재한다는 선언만 둔다.
+
+```cpp
+// World.h
+~World();
+```
+
+그리고 `Actor.h`를 볼 수 있는 CPP에서 정의한다.
+
+```cpp
+// World.cpp
+#include "World.h"
+#include "Actor.h"
+
+World::~World() = default;
+```
+
+이제 `World.cpp`를 컴파일할 때 다음 정보가 한곳에 모인다.
+
+```text
+World의 전체 구조
++
+Actor의 전체 구조
++
+World 소멸자를 생성하라는 정의
+```
+
+`= default`는 아무 일도 하지 말라는 뜻이 아니다. 멤버를 올바른 순서로 정리하는 기본 소멸자를 컴파일러가 만들어 달라는 뜻이다.
+
+### 7. 템플릿은 완성된 함수가 아니라 함수 제작 설명서다
+
+다음은 함수 템플릿이다.
+
+```cpp
+template<typename ActorType>
+ActorType* World::SpawnActor()
+{
+    auto NewActor = std::make_unique<ActorType>();
+    ...
+}
+```
+
+이 코드는 아직 특정한 하나의 함수가 아니다. `ActorType`에 실제 타입을 넣어 함수를 만드는 설명서다.
+
+```cpp
+SpawnActor<Actor>();
+SpawnActor<MonsterActor>();
+SpawnActor<PlayerActor>();
+```
+
+위의 호출들은 각각 서로 다른 실제 함수를 요구한다.
+
+```text
+SpawnActor<Actor>
+SpawnActor<MonsterActor>
+SpawnActor<PlayerActor>
+```
+
+컴파일러는 세상의 모든 타입을 미리 예상해서 함수를 만들 수 없다. 실제로 요청된 타입만 골라 함수를 만든다. 이 과정을 템플릿 인스턴스화라고 한다.
+
+### 8. 템플릿 본문을 CPP에만 두면 왜 연결할 함수가 없는가
+
+`World.cpp`에 템플릿 본문만 있다고 가정한다.
+
+```cpp
+// World.cpp
+template<typename ActorType>
+ActorType* World::SpawnActor()
+{
+    ...
+}
+```
+
+`World.cpp` 안에는 `SpawnActor<Actor>()`라는 실제 호출이 없다. 그러면 이 CPP를 컴파일하는 컴파일러는 어떤 타입의 함수를 만들어야 하는지 모른다.
+
+```text
+만드는 방법은 보임
+→ 템플릿 본문 있음
+
+무엇을 만들지는 모름
+→ Actor인지 MonsterActor인지 주문이 없음
+
+결과
+→ World.obj에 구체적인 SpawnActor 함수가 만들어지지 않음
+```
+
+반대로 `LightSaverGame.cpp`에는 실제 주문이 있다.
+
+```cpp
+GameWorld.SpawnActor<Actor>();
+```
+
+하지만 `World.h`에 선언만 있고 본문이 없다면 다음 상태가 된다.
+
+```text
+무엇을 만들지는 보임
+→ Actor
+
+어떻게 만들지는 모름
+→ 템플릿 본문이 보이지 않음
+```
+
+결국 두 컴파일러 모두 완성된 함수를 만들지 못한다.
+
+```text
+World.cpp 쪽
+→ 설명서는 있지만 주문 타입이 없음
+
+LightSaverGame.cpp 쪽
+→ 주문 타입은 있지만 설명서가 없음
+```
+
+링커가 실행되는 시점에는 이미 CPP별 컴파일이 끝났다. 링커는 한 OBJ의 주문과 다른 OBJ의 C++ 템플릿 설명서를 조합하여 새 기계어를 만들 수 없다. 따라서 실제 함수가 어느 OBJ에도 없다면 `LNK2019` 같은 링크 오류가 발생한다.
+
+### 9. 템플릿 본문을 헤더에 두는 이유
+
+템플릿 본문을 `World.h`에 두면 `LightSaverGame.cpp`가 헤더를 포함할 때 본문도 함께 볼 수 있다.
+
+```text
+LightSaverGame.cpp를 컴파일하는 순간
+
+주문 타입
+→ Actor
+
+제작 설명서
+→ SpawnActor 템플릿 본문
+
+두 정보가 모두 있음
+→ SpawnActor<Actor> 실제 함수 생성 가능
+```
+
+따라서 현재 `World::SpawnActor`와 `Actor::AddComponent`의 템플릿 구현은 헤더에 존재한다.
+
+```cpp
+// World.h
+template<typename ActorType>
+ActorType* World::SpawnActor()
+{
+    ...
+}
+
+// Actor.h
+template<typename ComponentType, typename... Args>
+ComponentType* Actor::AddComponent(Args&&... Arguments)
+{
+    ...
+}
+```
+
+### 10. 소멸자와 템플릿이 반대로 보이는 이유
+
+소멸자는 CPP에 정의했는데 템플릿은 헤더에 정의하므로 서로 반대 규칙처럼 보일 수 있다. 하지만 실제 규칙은 하나다.
+
+```text
+실제 기계어를 만드는 컴파일러가
+그 순간 필요한 정보를 전부 볼 수 있어야 한다.
+```
+
+소멸자가 필요한 정보:
+
+```text
+Actor의 완전한 구조
+```
+
+그 정보를 확실하게 보는 위치:
+
+```text
+Actor.h를 포함한 World.cpp
+```
+
+따라서 소멸자는 CPP에서 정의했다.
+
+템플릿이 필요한 정보:
+
+```text
+호출한 구체적인 타입
++
+템플릿 함수 본문
+```
+
+구체적인 타입 주문이 나타나는 위치:
+
+```text
+LightSaverGame.cpp의 SpawnActor<Actor>() 호출
+```
+
+따라서 그 CPP가 본문도 볼 수 있도록 템플릿을 헤더에 정의한다.
+
+### 11. 장난감 공장 비유로 다시 정리
+
+컴파일러를 각자 닫힌 방에서 일하는 장난감 공장이라고 생각한다.
+
+일반 소멸자는 이미 제품 이름이 정해져 있다.
+
+```text
+제품 이름: World 소멸자
+필요한 설명: Actor를 없애는 방법
+```
+
+`World.cpp` 방에는 `Actor.h` 설명서가 있으므로 여기서 제품을 완성한다. 다른 방에서는 `~World()`라는 제품 이름만 보고 나중에 링커가 연결하게 한다.
+
+템플릿은 맞춤 제작 설명서다.
+
+```text
+World.cpp 방
+→ 만드는 방법은 있지만 주문서에 타입이 없음
+
+LightSaverGame.cpp 방
+→ Actor로 만들어 달라는 주문은 있지만 만드는 방법이 없음
+```
+
+서로 닫힌 방이므로 두 정보를 합칠 수 없다. 제작 설명서를 헤더에 놓으면 주문이 들어온 모든 방에서 설명서를 볼 수 있어 맞춤 제품을 만들 수 있다.
+
+### 12. 컴파일 오류와 링크 오류의 차이
+
+컴파일 오류는 한 CPP를 OBJ로 만드는 도중 발생한다.
+
+```text
+문법이 틀림
+타입의 구조를 모름
+존재하지 않는 멤버를 사용함
+```
+
+링크 오류는 각 OBJ는 만들어졌지만 마지막 연결에 실패한 것이다.
+
+```text
+함수가 있다고 선언되어 호출은 기록됨
+하지만 어느 OBJ에도 그 함수의 실제 기계어가 없음
+```
+
+대표적으로 다음 메시지가 나온다.
+
+```text
+LNK2019: 확인할 수 없는 외부 기호
+```
+
+문제를 볼 때 다음처럼 구분하면 된다.
+
+```text
+컴파일 오류
+→ 현재 CPP가 코드를 이해하는 데 필요한 정보가 부족한가?
+
+링크 오류
+→ 선언은 보았지만 실제 함수 정의가 OBJ 어디에도 없는가?
+→ 템플릿의 구체적인 버전이 생성되지 않았는가?
+```
+
+### 13. 현재 코드에서 다음에 고칠 확장 지점
+
+현재 `World::SpawnActor`는 `ActorType`으로 객체를 만들지만 주소 변수는 `Actor*`로 선언되어 있다.
+
+```cpp
+auto NewActor = std::make_unique<ActorType>();
+Actor* ActorAddr = NewActor.get();
+```
+
+지금은 `SpawnActor<Actor>()`만 사용하므로 동작한다. 하지만 나중에 `MonsterActor*`를 정확하게 반환하려면 다음처럼 주소 변수도 템플릿 타입으로 맞추는 것이 자연스럽다.
+
+```cpp
+ActorType* ActorAddr = NewActor.get();
+```
+
+`Actor::AddComponent`의 전달 인자는 현재 포인터를 전달하는 범위에서는 동작한다. 이후 생성자 인자가 문자열이나 이동 전용 객체까지 확장될 때 `std::forward`를 적용해 값의 전달 성질을 보존하는 단계로 발전시킬 예정이다.
+
+### 오늘의 핵심 요약
+
+```text
+각 CPP
+→ 서로 독립적으로 컴파일되어 OBJ가 됨
+
+헤더
+→ include한 CPP가 함께 볼 수 있는 정보
+
+컴파일러
+→ C++ 코드를 실제 기계어 함수로 만듦
+
+링커
+→ 이미 만들어진 함수들을 연결함
+→ 템플릿을 대신 컴파일하지 않음
+
+일반 함수
+→ 헤더에 선언, CPP에 정의 가능
+
+불완전 타입을 가진 unique_ptr 소멸
+→ 실제 삭제 코드를 만드는 곳에서는 완전한 타입이 필요함
+
+템플릿 함수
+→ 구체적인 타입과 템플릿 본문을 동시에 봐야 실제 함수가 만들어짐
+→ 일반적으로 본문을 헤더에 둠
+```
+
+가장 중요한 한 문장은 다음과 같다.
+
+> 소멸자와 템플릿의 규칙이 서로 반대인 것이 아니라, 실제 코드를 만드는 컴파일러가 필요한 정보를 모두 볼 수 있는 위치에 각각의 정의를 둔 것이다.

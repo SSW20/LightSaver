@@ -9,8 +9,10 @@
 #include "Model.h"
 #include "Transform.h"
 #include "RenderObject.h"
-class Shader;
+#include "World.h"
 
+class Actor;
+class MeshComponent;
 struct alignas(16) CameraBufferData
 {
 	DirectX::XMFLOAT4X4 View;
@@ -69,6 +71,9 @@ private:
 	Model SpiderModel; 
 	Model FloorModel; 
 	Model WallModel;
-	RenderObject SpiderRenderObj, FloorRenderObj, WallRenderObj;
+	World GameWorld;
+	RenderObject FloorRenderObj, WallRenderObj;
 	std::vector<RenderObject*> RenderObjects;
+	Actor* SpiderActor = nullptr;
+	MeshComponent* SpiderMeshComponent = nullptr;
 };

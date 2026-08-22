@@ -131,12 +131,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="Actor.cpp" />
     <ClCompile Include="Camera.cpp" />
+    <ClCompile Include="Component.cpp" />
     <ClCompile Include="GameLoop.cpp" />
     <ClCompile Include="Graphics.cpp" />
     <ClCompile Include="LightSaverGame.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Mesh.cpp" />
+    <ClCompile Include="MeshComponent.cpp" />
     <ClCompile Include="Model.cpp" />
     <ClCompile Include="RenderObject.cpp" />
     <ClCompile Include="Shader.cpp" />
@@ -144,6 +147,7 @@
     <ClCompile Include="Timer.cpp" />
     <ClCompile Include="Transform.cpp" />
     <ClCompile Include="Windows.cpp" />
+    <ClCompile Include="World.cpp" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="shader.hlsl">
@@ -151,18 +155,23 @@
     </FxCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Actor.h" />
     <ClInclude Include="Camera.h" />
+    <ClInclude Include="Component.h" />
     <ClInclude Include="GameLoop.h" />
     <ClInclude Include="Graphics.h" />
     <ClInclude Include="LightSaverGame.h" />
     <ClInclude Include="Mesh.h" />
+    <ClInclude Include="MeshComponent.h" />
     <ClInclude Include="Model.h" />
     <ClInclude Include="RenderObject.h" />
+    <ClInclude Include="resource.h" />
     <ClInclude Include="Shader.h" />
     <ClInclude Include="Texture.h" />
     <ClInclude Include="Timer.h" />
     <ClInclude Include="Transform.h" />
     <ClInclude Include="Windows.h" />
+    <ClInclude Include="World.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
