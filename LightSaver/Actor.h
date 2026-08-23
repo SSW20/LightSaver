@@ -14,6 +14,9 @@ public:
 	template<typename ComponentType, typename... Args>
 	ComponentType* AddComponent(Args&& ...Arguments);
 
+	const std::vector<std::unique_ptr<Component>>& GetComponents() const { return Components; }
+	void CollectRenderObjects(std::vector<RenderObject>& OutRenderObjects) const;
+
 	virtual ~Actor();
 private:
 	Transform ActorTransform;

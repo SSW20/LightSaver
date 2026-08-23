@@ -8,5 +8,12 @@ void Actor::Update(float DeltaTime)
 		Components[i]->Update(DeltaTime);
 	}
 }
+void Actor::CollectRenderObjects(std::vector<RenderObject>& RenderObjects) const
+{
+	for (auto& Comp : Components)
+	{
+		Comp->CollectRenderObjects(RenderObjects);
+	}
+}
 
 Actor::~Actor() = default;

@@ -8294,3 +8294,663 @@ ActorType* ActorAddr = NewActor.get();
 가장 중요한 한 문장은 다음과 같다.
 
 > 소멸자와 템플릿의 규칙이 서로 반대인 것이 아니라, 실제 코드를 만드는 컴파일러가 필요한 정보를 모두 볼 수 있는 위치에 각각의 정의를 둔 것이다.
+
+---
+
+## 2026-08-24: 중앙 Renderer 분리와 RenderObject 수집 파이프라인
+
+### 오늘의 목표와 결과
+
+이번 단계의 목표는 `LightSaverGame`이 Direct3D 11의 세부 렌더링 명령을 직접 실행하던 구조에서 벗어나, 렌더링 책임을 `Renderer` 하나로 모으는 것이었다.
+
+변경 전 `LightSaverGame`은 다음 일을 모두 알고 있었다.
+
+```text
+게임 오브젝트 생성
+카메라 입력과 이동
+Shader 초기화와 Bind
+Viewport 설정
+Camera/Object/Light/Material Constant Buffer 생성
+Constant Buffer Map/Unmap
+Render Target과 Depth Buffer Clear
+Actor와 MeshComponent 검색
+Model Draw
+COM Buffer Release
+```
+
+이 상태에서는 게임 규칙을 고치려고 `LightSaverGame`을 열어도 Direct3D 코드가 함께 보이고, 렌더링 기능을 고치려고 해도 게임 오브젝트 생성 코드와 섞여 있었다. 클래스 하나가 너무 많은 이유로 변경되는 상태였다.
+
+이번 변경 후 책임은 다음처럼 나뉜다.
+
+```text
+LightSaverGame
+├── Model 리소스 준비
+├── World와 Actor 구성
+├── 카메라 입력 처리
+└── Renderer.Render(World, Camera) 호출
+
+Renderer
+├── Shader 소유와 Bind
+├── Viewport와 Render Target 상태 설정
+├── Constant Buffer 생성·갱신·해제
+├── RenderObject 목록 요청
+└── Model Draw 명령 제출
+
+World / Actor / Component
+└── 현재 프레임에 그릴 RenderObject 수집
+```
+
+핵심 변화는 다음 한 줄이다.
+
+```cpp
+return RenderManager.Render(GameWorld, MainCamera);
+```
+
+`LightSaverGame::Render()`는 이제 렌더링 내부 절차를 알 필요가 없다. 게임은 Renderer에게 “이 World를 이 Camera로 그려 달라”고 요청할 뿐이다.
+
+### 1. 분리한다는 것은 단순히 코드를 다른 파일로 옮기는 것이 아니다
+
+긴 함수를 `Renderer.cpp`로 복사했다고 해서 항상 제대로 분리된 것은 아니다. 진짜 분리는 **누가 어떤 정보를 알아야 하는가**가 달라지는 것이다.
+
+나쁜 분리는 다음과 같다.
+
+```text
+LightSaverGame의 코드를 Renderer로 복사함
+하지만 Renderer가 MonsterActor, WallActor, SpiderActor를 직접 앎
+```
+
+이 경우 파일 위치만 바뀌었을 뿐 Renderer가 여전히 게임의 구체적인 종류에 의존한다. 새로운 DoorActor를 추가할 때 Renderer까지 수정해야 한다면 책임이 충분히 분리되지 않은 것이다.
+
+현재 목표로 한 의존 관계는 다음과 같다.
+
+```text
+게임 쪽
+World → Actor → Component → RenderObject 생성
+
+렌더링 쪽
+Renderer → RenderObject를 읽어 GPU 명령 실행
+```
+
+Renderer는 그것이 거미인지, 발전기인지, 문인지 판단하지 않는다. Renderer가 필요한 질문은 다음뿐이다.
+
+```text
+어떤 Model을 그리는가?
+어떤 World Transform으로 그리는가?
+```
+
+### 2. Renderer가 소유하는 것과 참조만 하는 것
+
+현재 `Renderer`의 주요 멤버는 다음과 같다.
+
+```cpp
+Graphics* Graphic = nullptr;
+ID3D11Buffer* ObjectBuffer = nullptr;
+ID3D11Buffer* MaterialBuffer = nullptr;
+ID3D11Buffer* LightBuffer = nullptr;
+ID3D11Buffer* CameraBuffer = nullptr;
+D3D11_VIEWPORT ViewPort = {};
+Shader ShaderSet;
+```
+
+각 멤버의 소유 관계는 서로 다르다.
+
+```text
+Graphic
+→ GameLoop 쪽에서 이미 존재하는 Graphics를 가리키는 비소유 포인터
+→ Renderer가 delete하거나 Release하지 않음
+
+ShaderSet
+→ Renderer의 값 멤버
+→ Renderer가 생성되고 사라질 때 함께 생성·소멸
+
+네 개의 ID3D11Buffer*
+→ Renderer가 Device를 이용해 생성한 COM 객체
+→ Renderer 소멸자가 Release해야 함
+```
+
+이 차이를 모르면 이중 해제 또는 메모리 누수가 생길 수 있다.
+
+```text
+빌려 온 포인터를 해제함
+→ 실제 소유자가 나중에 다시 해제하여 이중 해제 가능
+
+직접 생성한 COM 객체를 해제하지 않음
+→ 참조 카운트가 남아 리소스 누수
+```
+
+Renderer는 COM 포인터를 가지고 있으므로 복사를 금지했다.
+
+```cpp
+Renderer(const Renderer&) = delete;
+Renderer& operator=(const Renderer&) = delete;
+```
+
+기본 얕은 복사를 허용하면 Renderer 두 개가 똑같은 COM 포인터를 가지게 되고, 두 소멸자가 같은 포인터에 `Release()`를 호출할 수 있기 때문이다.
+
+### 3. Renderer 초기화 단계
+
+`Renderer::Initialize(Graphics&)`는 한 번만 준비하면 되는 렌더링 자원을 만든다.
+
+```text
+Graphics 주소 저장
+→ Viewport 값 설정
+→ Shader 컴파일 및 생성
+→ Camera/Object/Light/Material Constant Buffer 생성
+→ Constant Buffer 슬롯 연결
+```
+
+Viewport는 백 버퍼 전체 중 래스터라이저 결과를 어느 화면 영역으로 보낼지 결정한다.
+
+```cpp
+ViewPort.TopLeftX = 0.0f;
+ViewPort.TopLeftY = 0.0f;
+ViewPort.Width = 1280.0f;
+ViewPort.Height = 720.0f;
+ViewPort.MinDepth = 0.0f;
+ViewPort.MaxDepth = 1.0f;
+```
+
+현재는 창 크기를 고정값으로 사용한다. 나중에 창 크기 변경을 지원하면 실제 Client Area 크기에 맞춰 Viewport와 Projection의 Aspect Ratio를 함께 갱신해야 한다.
+
+초기화에서 중요한 오류 처리 원칙은 다음과 같다.
+
+```text
+Shader 생성 실패
+→ Renderer 초기화 실패
+
+Constant Buffer 하나라도 생성 실패
+→ Renderer 초기화 실패
+
+Renderer 초기화 실패
+→ LightSaverGame 초기화 실패
+→ GameLoop 실행 시작 금지
+```
+
+반환값을 단순히 호출만 하고 무시하면 함수가 `bool`을 반환하는 의미가 사라진다. 현재 코드에서 `SetBuffers()`, `UpdateBuffers()`, `DrawWorld()`의 실패를 상위 호출자에게 전달하는 부분은 다음 정리 단계에서 마무리해야 한다.
+
+### 4. 한 프레임의 렌더링 순서
+
+현재 `Renderer::Render()`가 수행하는 큰 순서는 다음과 같다.
+
+```text
+1. OMSetRenderTargets
+2. ClearRenderTargetView
+3. ClearDepthStencilView
+4. RSSetViewports
+5. IASetPrimitiveTopology
+6. Shader Bind
+7. Camera/Light Buffer 갱신
+8. World에 RenderObject 수집 요청
+9. RenderObject마다 Object Buffer 갱신
+10. Model Draw
+```
+
+각 함수의 역할을 한 줄씩 보면 다음과 같다.
+
+#### `OMSetRenderTargets`
+
+```cpp
+DeviceContext->OMSetRenderTargets(1, &RTV, DSV);
+```
+
+Output Merger 단계에 “색은 이 Render Target에 쓰고 깊이는 이 Depth Stencil에 기록하라”고 지정한다. Direct3D 11의 Device Context는 상태를 기억하므로, Draw 전에 필요한 렌더 타깃이 연결되어 있어야 한다.
+
+#### `ClearRenderTargetView`
+
+```cpp
+DeviceContext->ClearRenderTargetView(RTV, ClearColor);
+```
+
+이전 프레임의 색을 지우고 이번 프레임의 배경색으로 채운다.
+
+#### `ClearDepthStencilView`
+
+```cpp
+DeviceContext->ClearDepthStencilView(DSV, D3D11_CLEAR_DEPTH, 1.0f, 0);
+```
+
+이전 프레임의 깊이값을 지운다. 색상만 지우고 깊이를 지우지 않으면 이전 프레임의 물체가 현재 프레임 물체를 가리는 이상한 결과가 생길 수 있다.
+
+#### `RSSetViewports`
+
+Vertex Shader 이후 만들어진 정점의 NDC 좌표를 실제 화면의 픽셀 영역에 대응시키는 Viewport를 설정한다.
+
+#### `IASetPrimitiveTopology`
+
+```cpp
+D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+```
+
+Index/Vertex 데이터의 정점 세 개씩을 서로 독립적인 삼각형으로 해석하도록 Input Assembler에 알려준다.
+
+#### `ShaderSet.Bind`
+
+현재 그리기에 사용할 Vertex Shader, Pixel Shader, Input Layout 등을 Device Context의 파이프라인 상태로 설정한다.
+
+중요한 원리는 다음과 같다.
+
+```text
+Direct3D 11
+→ 상태 설정
+→ Draw 호출
+→ Draw는 그 순간 설정되어 있는 상태를 사용
+```
+
+Draw 함수가 Shader나 Buffer를 인수로 전부 받는 구조가 아닌 이유가 바로 상태 기반 API이기 때문이다.
+
+### 5. Constant Buffer의 갱신 주기와 슬롯
+
+현재 Constant Buffer는 역할과 갱신 주기가 다르다.
+
+```text
+CameraBuffer
+→ View, Projection
+→ 보통 프레임당 한 번
+→ VS b0
+
+ObjectBuffer
+→ World Matrix
+→ 그리는 Object마다 한 번
+→ VS b1
+
+LightBuffer
+→ 손전등 위치, 방향, 색상, 범위, 원뿔 각도
+→ 현재는 카메라 손전등이므로 프레임당 한 번
+→ PS b2
+
+MaterialBuffer
+→ SpecularStrength, SpecularPower
+→ Model 내부 Mesh/Material이 바뀔 때마다 갱신
+→ PS b3
+```
+
+배열을 이용하면 연속 슬롯을 한 번에 연결할 수 있다.
+
+```cpp
+ID3D11Buffer* VsBuffers[] = { CameraBuffer, ObjectBuffer };
+DeviceContext->VSSetConstantBuffers(0, 2, VsBuffers);
+```
+
+뜻은 다음과 같다.
+
+```text
+VS의 0번 슬롯 ← CameraBuffer
+VS의 1번 슬롯 ← ObjectBuffer
+```
+
+Pixel Shader도 같은 방식이다.
+
+```cpp
+ID3D11Buffer* PsBuffers[] = { LightBuffer, MaterialBuffer };
+DeviceContext->PSSetConstantBuffers(2, 2, PsBuffers);
+```
+
+```text
+PS의 2번 슬롯 ← LightBuffer
+PS의 3번 슬롯 ← MaterialBuffer
+```
+
+`Map(D3D11_MAP_WRITE_DISCARD)`는 Dynamic Buffer의 이전 내용을 버리고 CPU가 새로운 데이터를 쓸 메모리를 요청한다. `MappedResource.pData`가 실제 쓰기 주소이고, 데이터를 기록한 뒤 `Unmap()`해야 GPU가 그 내용을 사용할 수 있다.
+
+### 6. RenderObject는 게임 오브젝트가 아니라 렌더링 요청서다
+
+현재 `RenderObject`는 다음 두 정보를 가진다.
+
+```cpp
+struct RenderObject
+{
+    Model* ModelSet = nullptr;
+    Transform ModelWorldTransform;
+};
+```
+
+이를 말로 바꾸면 다음과 같다.
+
+```text
+ModelSet
+→ 어떤 모양과 Material을 그릴 것인가
+
+ModelWorldTransform
+→ 그 Model을 이번 프레임 어디에, 어떤 회전과 크기로 그릴 것인가
+```
+
+예를 들어 거미 Actor 전체를 Renderer에 넘기는 대신 다음처럼 필요한 정보만 뽑는다.
+
+```text
+거미 Actor
+├── 게임 로직과 Component 목록
+├── 충돌이나 AI 상태
+└── 렌더링에 필요한 정보
+    ├── SpiderModel 포인터
+    └── 현재 Transform 복사본
+```
+
+Renderer는 마지막 두 정보만 받는다. AI 상태나 Actor의 Component 배열은 몰라도 된다.
+
+`Model*`은 복사하지 않고 포인터로 가리킨다. Model에는 Mesh, Texture 같은 무거운 리소스가 들어 있으므로 프레임마다 복사하면 안 된다. 이 포인터는 소유 포인터가 아니며, 실제 Model은 현재 `LightSaverGame`이 더 오래 살아 있도록 보관한다.
+
+Transform은 작은 데이터이고 현재 프레임의 위치를 나타내므로 값으로 복사한다. 따라서 RenderObject는 다음 성격을 가진다.
+
+```text
+Model 리소스
+→ 원본을 비소유 포인터로 참조
+
+Transform
+→ 이번 프레임의 상태를 값으로 저장한 스냅샷
+```
+
+이는 Unreal Engine의 Render Proxy/Scene Proxy 발상을 매우 단순화한 학습용 구조로 볼 수 있다. 실제 Unreal 구조는 게임 스레드와 렌더 스레드 분리, 더 많은 렌더 상태와 수명 동기화를 포함하므로 현재 코드와 완전히 같은 것은 아니다.
+
+### 7. `CollectRenderObjects`의 가상 함수 흐름
+
+Renderer가 `dynamic_cast<MeshComponent*>`로 모든 Component의 실제 타입을 검사하면 Renderer가 MeshComponent를 직접 알아야 한다.
+
+이 의존성을 없애기 위해 Component에 가상 함수를 추가했다.
+
+```cpp
+virtual void CollectRenderObjects(
+    std::vector<RenderObject>& RenderObjects) const;
+```
+
+일반 Component의 기본 구현은 아무 일도 하지 않는다.
+
+```text
+카메라 이동 Component
+→ 그릴 Model이 없으므로 아무것도 추가하지 않음
+
+AI Component
+→ 그릴 Model이 없으므로 아무것도 추가하지 않음
+
+MeshComponent
+→ Model과 Owner Transform을 RenderObject로 만들어 추가
+```
+
+MeshComponent는 이 함수를 `override`한다. Actor는 Component의 정확한 자식 타입을 검사하지 않고 모든 Component에 같은 요청을 보낸다.
+
+```cpp
+Comp->CollectRenderObjects(RenderObjects);
+```
+
+여기서 `Comp`의 정적 타입이 `Component*`여도 실제 객체가 MeshComponent라면 가상 함수 호출을 통해 `MeshComponent::CollectRenderObjects()`가 실행된다.
+
+```text
+Component*가 실제로 일반 Component를 가리킴
+→ Component 기본 함수 실행
+
+Component*가 실제로 MeshComponent를 가리킴
+→ MeshComponent override 함수 실행
+```
+
+이것이 런타임 다형성이며, Renderer의 `dynamic_cast`와 타입별 `if`를 없애는 핵심이다.
+
+### 8. 하나의 vector가 Renderer부터 MeshComponent까지 이동하는 과정
+
+`OutRenderObjects`라는 이름은 C++ 문법이 아니다. 함수가 이 매개변수에 결과를 채운다는 의도를 보여 주는 이름이다.
+
+최초의 vector는 Renderer가 현재 프레임의 지역 변수로 만든다.
+
+```cpp
+std::vector<RenderObject> RenderObjects;
+WorldSet.CollectRenderObjects(RenderObjects);
+```
+
+그 뒤 같은 vector가 참조로 전달된다.
+
+```text
+Renderer가 빈 vector 생성
+          ↓ & 참조 전달
+World가 모든 Actor에 전달
+          ↓ 같은 vector의 참조
+Actor가 모든 Component에 전달
+          ↓ 같은 vector의 참조
+MeshComponent가 push_back
+          ↓
+Renderer가 채워진 vector를 순회
+```
+
+함수 매개변수의 `&`가 중요하다.
+
+```cpp
+std::vector<RenderObject>& OutRenderObjects
+```
+
+`&`가 없다면 각 함수가 vector 복사본을 받아 자기 복사본만 수정할 수 있다. 원본에 결과가 남지 않고, 큰 목록을 여러 번 복사하는 비용도 발생한다.
+
+`const`는 함수가 자기 객체의 상태를 바꾸지 않는다는 뜻이다.
+
+```cpp
+void Actor::CollectRenderObjects(...) const;
+```
+
+Actor의 Component를 읽고 외부에서 받은 vector에 결과를 추가하지만 Actor 자신의 Transform이나 Components 배열을 변경하지 않으므로 `const`가 성립한다.
+
+### 9. RenderObject 목록을 매 프레임 지역 변수로 두는 이유
+
+현재 RenderObject 목록은 Renderer의 `Render()` 또는 `DrawWorld()` 안에서 잠시 존재하는 것이 적절하다.
+
+```text
+프레임 N
+→ 현재 Transform을 복사하여 RenderObject 목록 생성
+→ Draw 완료
+→ 목록 소멸
+
+프레임 N+1
+→ 이동·회전한 최신 Transform으로 다시 목록 생성
+```
+
+World가 목록을 영구 멤버로 보관하면 Actor가 움직일 때마다 RenderObject도 동기화해야 하고, Actor가 삭제될 때 오래된 Model 포인터를 목록에서 제거해야 한다. 지금 단계에서는 매 프레임 새 스냅샷을 만드는 편이 구조가 단순하고 안전하다.
+
+오브젝트 수가 매우 많아져 vector의 반복 할당이 측정 가능한 문제가 되면 Renderer가 `RenderQueue`를 멤버로 보관하고 다음처럼 메모리 용량을 재사용할 수 있다.
+
+```cpp
+RenderQueue.clear();
+WorldSet.CollectRenderObjects(RenderQueue);
+```
+
+`clear()`는 원소 수를 0으로 만들지만 보통 vector가 확보한 capacity는 유지하므로 다음 프레임에 같은 정도의 원소를 넣을 때 재할당을 줄일 수 있다. 하지만 지금은 성능을 추측해서 구조를 복잡하게 만들기보다 지역 변수 방식으로 기능과 책임을 먼저 검증한다.
+
+### 10. 중첩 반복문 때문에 같은 Object를 여러 번 그렸던 문제
+
+RenderObject 목록을 이미 모두 수집한 뒤 기존 Actor 반복문을 남겨 두면 다음 구조가 된다.
+
+```cpp
+for (Actor 3개)
+{
+    for (RenderObject 3개)
+    {
+        DrawModel();
+    }
+}
+```
+
+이 경우 실제 오브젝트는 세 개지만 Draw는 아홉 번 호출된다.
+
+```text
+Actor 개수 N
+RenderObject 개수 N
+잘못된 Draw 횟수 N × N
+```
+
+수집이 끝난 뒤 Renderer는 RenderObject 목록만 한 번 순회해야 한다.
+
+```cpp
+for (const RenderObject& RenderObj : RenderObjects)
+{
+    DrawModel(...);
+}
+```
+
+이 문제는 화면이 얼핏 정상처럼 보여도 같은 위치에 같은 모델을 여러 번 덮어 그리기 때문에 찾기 어려울 수 있다. Draw 호출 수, RenderObject 목록 크기, 중첩 반복문의 의미를 함께 확인해야 한다.
+
+### 11. 중앙 Renderer가 각 Actor가 스스로 Render하는 방식보다 유리한 점
+
+각 Actor가 자신의 `Render()`에서 바로 Draw하면 처음에는 단순하다.
+
+```text
+Actor::Render
+→ Mesh Bind
+→ Texture Bind
+→ Draw
+```
+
+하지만 렌더링 순서를 전체적으로 제어하기 어렵다.
+
+```text
+불투명 물체 먼저 출력
+투명 물체를 카메라 거리순으로 정렬
+같은 Shader끼리 묶어서 상태 변경 감소
+그림자용으로 한 번 더 출력
+레이더용 Top View Camera로 다시 출력
+손전등/안개 Post Process 적용
+시야 밖 Object Culling
+```
+
+이 작업들은 오브젝트 하나만 봐서는 결정하기 어렵고 전체 렌더 대상 목록을 봐야 한다. 중앙 Renderer가 RenderObject를 모으면 이후 다음 구조로 확장할 수 있다.
+
+```text
+RenderObject 수집
+→ 보이는 대상만 선택
+→ Shader/Material 기준 정렬
+→ Main Camera Pass
+→ Radar Camera Pass
+→ Post Process
+→ Present
+```
+
+현재 공포 게임 기획의 레이더는 같은 World를 위에서 보는 별도 Camera Pass가 될 가능성이 높다. 중앙 Renderer 구조는 이 확장에 특히 유리하다.
+
+### 12. `Present()`가 Renderer가 아니라 GameLoop에 남는 이유
+
+현재 한 프레임의 상위 흐름은 다음과 같다.
+
+```text
+GameLoop
+├── 메시지 처리
+├── Timer Tick
+├── Game Update
+├── LightSaverGame::Render
+│   └── Renderer::Render
+└── SwapChain::Present
+```
+
+Renderer는 백 버퍼에 그림을 완성한다. `Present()`는 완성된 프레임을 실제 화면에 표시하고 다음 프레임으로 넘어가는 경계를 만든다.
+
+Present를 GameLoop에 두면 다음 원칙이 유지된다.
+
+```text
+Renderer
+→ 한 프레임에 무엇을 어떻게 그릴지 담당
+
+GameLoop
+→ 한 프레임을 언제 끝내고 화면에 제출할지 담당
+```
+
+나중에 Renderer가 여러 Pass를 실행해도 모든 Pass가 끝난 뒤 Present는 프레임당 한 번만 호출하면 된다.
+
+### 13. 현재 구조에서의 수명 관계
+
+현재 주요 객체의 수명은 다음처럼 이해할 수 있다.
+
+```text
+LightSaverGame
+├── Camera
+├── Model 리소스들
+├── World
+│   └── unique_ptr<Actor>
+│       └── unique_ptr<Component>
+└── Renderer
+    ├── Shader
+    └── Direct3D Constant Buffer COM 객체
+```
+
+관찰용 포인터는 다음과 같다.
+
+```text
+MeshComponent::ModelSet
+→ LightSaverGame이 소유한 Model을 가리킴
+
+Component::pOwner
+→ 자신을 소유한 Actor를 가리킴
+
+RenderObject::ModelSet
+→ Model 원본을 잠깐 가리키는 비소유 포인터
+
+Renderer::Graphic
+→ GameLoop이 가진 Graphics를 가리키는 비소유 포인터
+```
+
+이 포인터들은 직접 `delete`하지 않는다. 대신 실제 소유자가 포인터 사용자보다 오래 살아야 한다. 이후 ResourceManager를 만들면 Model과 Texture의 실제 소유권은 LightSaverGame에서 ResourceManager로 이동할 수 있다.
+
+### 14. 현재 완료된 범위와 남은 정리
+
+현재 완료된 구조:
+
+```text
+Renderer 클래스 생성
+Shader/ViewPort/Clear/Constant Buffer 책임 이동
+LightSaverGame의 Render 코드 축소
+World → Actor → Component 수집 경로 생성
+MeshComponent가 RenderObject 생성
+Renderer의 dynamic_cast 제거
+Renderer가 RenderObject만 순회하여 Draw
+```
+
+현재 코드에 남은 짧은 안정성 정리:
+
+```text
+Renderer::Initialize에서 SetBuffers 실패 전달
+Renderer::Render에서 UpdateBuffers/DrawWorld 실패 전달
+Renderer::DrawWorld에서 DrawModel 실패 전달
+LightSaverGame::OnInitialize에서 Renderer 초기화 실패 전달
+World와 Actor 수집 반복문에서 nullptr 방어
+사용하지 않는 HRESULT와 include 제거
+```
+
+이 항목들은 구조를 바꾸는 새 기능이 아니라 실패가 조용히 무시되지 않게 만드는 마무리 작업이다.
+
+그 뒤 렌더링의 확장 항목은 별도 단계로 취급한다.
+
+```text
+창 Resize에 따른 Viewport/Projection 재설정
+ResourceManager로 Model/Texture 공유
+Shader/Material별 RenderObject 정렬
+Frustum Culling
+투명 오브젝트 정렬
+안개와 Post Process
+그림자
+레이더용 두 번째 Camera Pass
+```
+
+### 오늘의 핵심 요약
+
+```text
+LightSaverGame
+→ 게임 상태와 입력을 담당
+→ Renderer의 공개 함수만 호출
+
+Renderer
+→ Direct3D 11 상태와 GPU 리소스를 관리
+→ 현재 프레임의 RenderObject 목록을 요청하여 Draw
+
+RenderObject
+→ 게임 객체 자체가 아님
+→ Model 포인터와 현재 World Transform을 묶은 렌더링 요청서
+
+CollectRenderObjects
+→ Renderer가 만든 하나의 vector를 참조로 전달
+→ World → Actor → Component 순서로 내려감
+→ MeshComponent가 RenderObject를 push_back
+
+virtual / override
+→ Component 포인터만으로 실제 MeshComponent 구현 호출
+→ dynamic_cast와 타입별 분기 제거
+
+중앙 Renderer의 목적
+→ 코드를 다른 파일로 옮기는 것에 그치지 않음
+→ 게임 종류를 모르고 렌더 데이터만 처리하게 만듦
+→ 정렬, Culling, 여러 Pass, 레이더 같은 확장의 기반을 만듦
+```
+
+가장 중요한 한 문장은 다음과 같다.
+
+> World는 무엇이 존재하는지 알고, 각 Component는 자신이 어떤 렌더 데이터를 제공할지 알며, Renderer는 그 데이터가 어떤 게임 오브젝트에서 왔는지 몰라도 그릴 수 있어야 한다.

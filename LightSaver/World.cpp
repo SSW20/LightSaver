@@ -18,3 +18,11 @@ void World::Update(float DeltaTime)
 World::World() = default;
 World::~World() = default;
 
+void World::CollectRenderObjects(std::vector<RenderObject>& OutRenderObjects) const
+{
+	for (auto& Actor : Actors)
+	{
+		Actor->CollectRenderObjects(OutRenderObjects);
+	}
+}
+
