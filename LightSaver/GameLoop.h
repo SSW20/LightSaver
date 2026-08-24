@@ -2,7 +2,7 @@
 #include "Windows.h"
 #include "Graphics.h"
 #include "Timer.h"
-
+#include "InputManager.h"
 class GameLoop
 {
 public:
@@ -22,6 +22,7 @@ protected:
 
 	Graphics& GetGraphics();
 	Windows& GetWindow();
+	InputManager& GetInput();
 	void RequestExit();
 
 private:
@@ -30,4 +31,5 @@ private:
 	Timer timer;
 	bool initialized = false;
 	bool isRunning = false;
+	InputManager Input;
 };

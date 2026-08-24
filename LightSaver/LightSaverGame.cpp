@@ -30,8 +30,6 @@ bool LightSaverGame::OnInitialize()
 	FloorActor->AddComponent<MeshComponent>(&FloorModel);
 
 	RenderManager.Initialize(GetGraphics());
-
-	ShowCursor(FALSE);
 	return true;
 }
 
@@ -42,24 +40,21 @@ void LightSaverGame::Update(float deltaTime)
 	{
 		SpiderActor->GetActorTransform().Rotation.y = Rotation;
 	}
-
-	if (GetForegroundWindow() != GetWindow().GetHWND()) return;
-
 	float ForwardInput = 0.f;
 	float RightInput = 0.f;
-	if (GetAsyncKeyState('W') & 0x8000)
+	if (GetInput().IsKeyDown('W'))
 	{
 		ForwardInput += 1.f;
 	}
-	if (GetAsyncKeyState('A') & 0x8000)
+	if (GetInput().IsKeyDown('A'))
 	{
 		RightInput -= 1.f;
 	}
-	if (GetAsyncKeyState('S') & 0x8000)
+	if (GetInput().IsKeyDown('S'))
 	{
 		ForwardInput -= 1.f;
 	}
-	if (GetAsyncKeyState('D') & 0x8000)
+	if (GetInput().IsKeyDown('D'))
 	{
 		RightInput += 1.f;
 	}
@@ -73,25 +68,7 @@ void LightSaverGame::Update(float deltaTime)
 	float MoveDistance = CameraSpeed * deltaTime;
 	MainCamera.AddForward(ForwardInput * MoveDistance);
 	MainCamera.AddRight(RightInput * MoveDistance);
-
-	RECT ClientSize;
-	GetClientRect(GetWindow().GetHWND(), &ClientSize);
-
-	POINT Center;
-	Center.x = (ClientSize.left + ClientSize.right) / 2;
-	Center.y = (ClientSize.top + ClientSize.bottom) / 2;
-
-	ClientToScreen(GetWindow().GetHWND(), &Center);
-
-	POINT MousePos;
-	GetCursorPos(&MousePos);
-
-	long DeltaX = MousePos.x - Center.x;
-	long DeltaY = MousePos.y - Center.y;
-
-	MainCamera.AddRotation(DeltaX * MouseSpeed, -DeltaY * MouseSpeed);
-	SetCursorPos(Center.x, Center.y);
-
+	MainCamera.AddRotation(GetInput().GetDeltaX() * MouseSpeed, -GetInput().GetDeltaY() * MouseSpeed);
 	GameWorld.Update(deltaTime);
 }
 

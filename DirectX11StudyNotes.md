@@ -8954,3 +8954,329 @@ virtual / override
 가장 중요한 한 문장은 다음과 같다.
 
 > World는 무엇이 존재하는지 알고, 각 Component는 자신이 어떤 렌더 데이터를 제공할지 알며, Renderer는 그 데이터가 어떤 게임 오브젝트에서 왔는지 몰라도 그릴 수 있어야 한다.
+
+---
+
+## 2026-08-25: InputManager 분리
+
+### 1. 이번 작업의 목적
+
+기존에는 `LightSaverGame::Update()`가 게임 규칙을 처리하면서 Win32 입력 함수까지 직접 호출했다.
+
+```text
+LightSaverGame::Update
+├── GetAsyncKeyState로 키보드 검사
+├── GetClientRect로 창 크기 검사
+├── ClientToScreen으로 화면 좌표 변환
+├── GetCursorPos로 마우스 위치 검사
+├── SetCursorPos로 마우스를 중앙에 이동
+└── 입력 결과를 이용하여 Camera 이동·회전
+```
+
+이 구조에서는 `LightSaverGame`이 다음 두 책임을 동시에 가진다.
+
+```text
+1. 운영체제에서 입력을 수집하는 일
+2. 수집된 입력을 이용해 게임을 움직이는 일
+```
+
+이번에는 첫 번째 책임을 `InputManager`로 옮겼다. 따라서 게임 코드는 Win32 함수의 세부 사용법을 몰라도 다음처럼 입력의 의미만 질문한다.
+
+```cpp
+GetInput().IsKeyDown('W');
+GetInput().GetDeltaX();
+GetInput().GetDeltaY();
+```
+
+중요한 변화는 단순히 코드를 다른 파일로 옮긴 것이 아니다.
+
+```text
+InputManager  = 현재 입력 상태를 수집하고 저장
+LightSaverGame = 그 입력을 게임 규칙으로 해석
+```
+
+예를 들어 `InputManager`는 W가 눌렸다는 사실만 알려준다. W를 전진으로 사용할지, 메뉴 선택으로 사용할지는 `LightSaverGame`이나 이후의 `PlayerController`가 결정한다.
+
+### 2. 현재 프레임과 이전 프레임이 필요한 이유
+
+키 입력은 한 프레임의 참/거짓만으로 세 가지 질문을 모두 답할 수 없다.
+
+```cpp
+bool CurrentKeys[256];
+bool PreviousKeys[256];
+```
+
+두 배열을 비교하면 키의 변화를 구분할 수 있다.
+
+| 이전 프레임 | 현재 프레임 | 의미 |
+|---|---|---|
+| false | false | 계속 떼고 있음 |
+| false | true | 이번 프레임에 막 누름 (`Pressed`) |
+| true | true | 계속 누르고 있음 (`Down`) |
+| true | false | 이번 프레임에 막 뗌 (`Released`) |
+
+따라서 세 함수는 용도가 다르다.
+
+```text
+IsKeyDown     → 누르고 있는 모든 프레임에 true
+IsKeyPressed  → 누르기 시작한 딱 한 프레임에 true
+IsKeyReleased → 떼기 시작한 딱 한 프레임에 true
+```
+
+게임에서 다음처럼 사용한다.
+
+```text
+W 이동             → IsKeyDown
+스페이스바 점프 시작 → IsKeyPressed
+차징 공격 발사       → IsKeyReleased
+```
+
+`IsKeyPressed`를 이동에 사용하면 W를 길게 눌러도 최초 한 프레임만 움직인다. 반대로 `IsKeyDown`을 메뉴 토글에 사용하면 누르고 있는 동안 매 프레임 메뉴가 열리고 닫힐 수 있다.
+
+### 3. BeginFrame의 순서
+
+한 프레임이 시작될 때 `GameLoop`가 `Input.BeginFrame()`을 한 번 호출한다.
+
+```text
+GameLoop::Run
+├── Window 메시지 처리
+├── Timer에서 deltaTime 획득
+├── InputManager::BeginFrame
+├── LightSaverGame::Update
+└── Render
+```
+
+`BeginFrame()` 안에서는 다음 순서를 사용한다.
+
+```text
+1. CurrentKeys를 PreviousKeys에 복사
+2. GetAsyncKeyState로 새로운 CurrentKeys 작성
+3. 마우스의 현재 위치와 창 중앙의 차이 계산
+4. 마우스를 다시 창 중앙으로 이동
+```
+
+복사를 먼저 해야 한다. 새 입력으로 `CurrentKeys`를 덮어쓴 다음 복사하면 이전과 현재가 똑같아져서 `Pressed`와 `Released`를 검출할 수 없다.
+
+예를 들어 W를 이번 프레임에 처음 누르면 다음과 같이 변한다.
+
+```text
+프레임 시작 전: Current W = false
+Previous에 복사: Previous W = false
+새 입력 수집:   Current W = true
+결과: Current && !Previous = true
+```
+
+### 4. GetAsyncKeyState와 0x8000
+
+`GetAsyncKeyState(Key)`는 단순한 `bool`이 아니라 여러 비트를 담은 `SHORT` 값을 반환한다. 그중 최상위 비트는 현재 키가 눌려 있는지를 나타낸다.
+
+```cpp
+(GetAsyncKeyState(Key) & 0x8000) != 0
+```
+
+여기서 `&`는 논리 AND가 아니라 비트 AND다.
+
+```text
+반환값 & 0x8000
+→ 눌림 상태 비트만 남김
+→ 결과가 0이 아니면 현재 눌림
+```
+
+이 결과를 `CurrentKeys[Key]`에 저장하므로 이후 게임 코드는 Win32 반환값이나 비트 마스크를 알 필요가 없다.
+
+### 5. 비활성 창에서 입력을 버리는 이유
+
+`GetForegroundWindow()`는 현재 사용자가 실제로 조작하고 있는 최상위 창의 `HWND`를 반환한다.
+
+```cpp
+if (GetForegroundWindow() != WindowHandle)
+```
+
+이 조건이 참이면 LightSaver 창은 비활성 상태다. 이때 입력을 계속 처리하면 다른 프로그램을 사용하는 동안 캐릭터가 움직이거나, 게임이 마우스를 화면 중앙으로 다시 끌어올 수 있다.
+
+따라서 비활성 상태에서는 다음 처리를 한다.
+
+```text
+MouseDeltaX/Y = 0
+CurrentKeys/PreviousKeys = false
+마우스를 중앙으로 이동하지 않음
+즉시 BeginFrame 종료
+```
+
+키 배열을 모두 비우는 이유는 `Released` 오검출을 방지하기 위해서다. 예를 들어 W를 누른 채 Alt+Tab을 하면 게임은 W를 뗀 순간을 직접 관찰하지 못할 수 있다. 이전 상태를 그대로 보존하면 다시 활성화됐을 때 오래된 입력이 남는다.
+
+### 6. FPS 마우스가 중앙으로 돌아오는 원리
+
+FPS 카메라는 마우스 커서의 절대 위치보다 한 프레임 동안 움직인 양이 필요하다.
+
+```text
+화면 좌표의 현재 커서 위치 - 게임 창 중앙 위치 = MouseDelta
+```
+
+예를 들어 창 중앙이 `(800, 450)`이고 현재 커서가 `(806, 447)`이면 다음과 같다.
+
+```text
+DeltaX = 806 - 800 = +6
+DeltaY = 447 - 450 = -3
+```
+
+이 값을 Yaw와 Pitch에 더한 후 커서를 다시 `(800, 450)`으로 옮긴다. 다음 프레임도 같은 중앙점을 기준으로 이동량을 측정할 수 있으므로 커서가 화면 가장자리에 막히지 않고 계속 회전할 수 있다.
+
+```cpp
+MainCamera.AddRotation(
+    GetInput().GetDeltaX() * MouseSpeed,
+   -GetInput().GetDeltaY() * MouseSpeed);
+```
+
+화면 좌표의 Y는 아래쪽으로 갈수록 증가하지만 일반적인 카메라 Pitch는 위를 볼 때 양수로 다루기 때문에 `DeltaY` 앞에 음수를 붙였다.
+
+### 7. GetClientRect와 ClientToScreen
+
+`GetClientRect(WindowHandle, &ClientSize)`는 제목 표시줄과 테두리를 제외한 클라이언트 영역의 크기를 구한다. 반환되는 좌표는 창 내부 기준이므로 보통 왼쪽 위가 `(0, 0)`이다.
+
+```cpp
+Center.x = (ClientSize.left + ClientSize.right) / 2;
+Center.y = (ClientSize.top + ClientSize.bottom) / 2;
+```
+
+하지만 `GetCursorPos`와 `SetCursorPos`는 모니터 전체를 기준으로 하는 화면 좌표를 사용한다. 좌표계가 서로 다르므로 다음 변환이 필요하다.
+
+```cpp
+ClientToScreen(WindowHandle, &Center);
+```
+
+정리하면 다음과 같다.
+
+```text
+GetClientRect  → 게임이 그려지는 창 내부의 중앙 계산
+ClientToScreen → 그 중앙을 모니터 전체 기준 좌표로 변환
+GetCursorPos   → 현재 커서의 화면 좌표 획득
+SetCursorPos   → 커서를 화면 좌표의 중앙으로 복귀
+```
+
+### 8. 다시 활성화된 첫 프레임을 따로 처리하는 이유
+
+게임이 비활성화된 동안 마우스는 어디로든 이동할 수 있다. 다시 게임을 클릭한 첫 프레임에 곧바로 다음 계산을 하면 큰 차이가 생긴다.
+
+```text
+멀리 이동한 커서 위치 - 게임 창 중앙
+→ 매우 큰 MouseDelta
+→ 카메라가 갑자기 튐
+```
+
+현재 구현의 `FirstWindowActive`는 다시 활성화된 첫 프레임에는 이동량을 사용하지 않고 커서만 중앙으로 되돌리기 위한 상태다.
+
+```text
+비활성화됨 → FirstWindowActive = true
+다시 활성화된 첫 프레임 → 중앙으로 이동하고 return
+그다음 프레임부터 → 정상적으로 delta 계산
+```
+
+이때 `MouseDeltaX/Y`를 첫 활성 프레임에도 명시적으로 0으로 만드는 편이 더 안전하다. 현재 값이 우연히 0이라는 가정에 의존하지 않게 되기 때문이다.
+
+### 9. 왜 입력 수집은 Update보다 먼저 하는가
+
+`LightSaverGame::Update()`가 카메라를 움직일 때는 반드시 이번 프레임의 입력이 준비되어 있어야 한다.
+
+```text
+Input.BeginFrame → 최신 입력 상태 저장
+Update           → 최신 입력을 읽어 게임 상태 변경
+Render           → 변경된 카메라와 게임 상태를 그림
+```
+
+순서를 반대로 하면 Update는 한 프레임 전 입력을 읽게 되어 입력 지연이 생긴다.
+
+### 10. 자료형: LONG과 float
+
+Win32의 `POINT.x`, `POINT.y`는 `LONG`이다. 두 화면 좌표를 빼서 구한 마우스 이동량도 정수 픽셀 수이므로 `InputManager`에는 `long`으로 저장하는 것이 자연스럽다.
+
+```cpp
+long MouseDeltaX;
+long MouseDeltaY;
+```
+
+카메라 회전에 사용할 때는 `MouseSpeed`가 `float`이므로 곱셈 결과가 실수로 변환된다.
+
+```cpp
+long delta pixel × float radian-per-pixel
+→ float 회전량
+```
+
+입력 수집 단계에서는 정확한 픽셀 수를 저장하고, 게임 규칙 단계에서 감도와 곱하여 라디안 회전량으로 바꾸는 흐름이다.
+
+### 11. 현재 클래스 간 관계
+
+```text
+GameLoop
+├── Windows
+├── Timer
+├── Graphics
+└── InputManager
+     ├── 대상 창 HWND
+     ├── 현재/이전 키 상태
+     └── 마우스 프레임 이동량
+
+LightSaverGame : GameLoop
+└── GetInput()을 통해 InputManager 조회
+```
+
+`GameLoop`가 InputManager를 값 멤버로 소유하므로 별도의 `new`, `delete`, Singleton이 필요 없다. `GameLoop`가 살아 있는 동안 InputManager도 함께 살아 있고, 게임 종료 시 자동으로 소멸한다.
+
+초기화 순서는 다음과 같다.
+
+```text
+Windows::Initialize
+→ HWND 생성
+→ InputManager::Initialize(HWND)
+→ Graphics::Initialize(HWND)
+→ 게임별 OnInitialize
+```
+
+InputManager가 어떤 창의 활성 상태와 중앙 위치를 확인할지 알아야 하므로 Windows가 먼저 생성되어야 한다.
+
+### 12. 현재 남은 입력 단계
+
+현재 코드는 키보드 상태와 마우스 이동량을 한곳에서 수집하는 데 성공했다. 다음에는 마우스 캡처 상태를 명시적으로 관리한다.
+
+```text
+게임 플레이 중
+→ 마우스 캡처 true
+→ 커서 숨김
+→ 매 프레임 중앙 복귀
+→ 카메라 회전
+
+창 비활성 또는 메뉴 상태
+→ 마우스 캡처 일시 중지
+→ 커서 표시
+→ 중앙 복귀하지 않음
+→ MouseDelta 0
+```
+
+주의할 점은 `ShowCursor(FALSE)`를 매 프레임 호출하면 안 된다는 것이다. 이 함수는 단순한 bool 설정 함수가 아니라 내부 표시 카운터를 증가·감소시킨다. 따라서 캡처 상태가 실제로 바뀌는 순간에만 한 번 호출해야 한다.
+
+그 뒤 입력 시스템을 마무리하면 다음 큰 단계로 이동한다.
+
+```text
+InputManager 마무리
+→ 간단한 Collider 표현
+→ Ray 구조체
+→ Ray와 AABB 충돌 검사
+→ 카메라 중앙 Raycast
+→ 손전등 범위와 시야 판정의 기초
+```
+
+### 오늘의 핵심 요약
+
+```text
+입력 수집과 게임 반응을 분리했다.
+Current/Previous 비교로 Down/Pressed/Released를 구분한다.
+BeginFrame에서 입력을 먼저 갱신한 후 게임 Update가 읽는다.
+비활성 창에서는 입력과 마우스 delta를 비운다.
+FPS 마우스는 절대 위치가 아니라 창 중앙으로부터의 이동량을 사용한다.
+Win32 화면 좌표와 클라이언트 좌표가 달라 ClientToScreen이 필요하다.
+InputManager는 GameLoop가 직접 소유하므로 전역 객체나 Singleton이 필요 없다.
+```
+
+가장 중요한 한 문장은 다음과 같다.
+
+> InputManager는 키가 눌렸다는 사실만 수집하고, 그 입력이 전진·점프·메뉴 중 무엇을 의미하는지는 게임 코드가 결정한다.

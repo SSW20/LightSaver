@@ -3,6 +3,7 @@
 bool GameLoop::Initialize(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
 	if (!windows.Initialize(hInstance, hPrevInstance, lpCmdLine, nCmdShow)) return false;
+	if (!Input.Initialize(windows.GetHWND())) return false;
 	if (!graphics.Initialize(windows.GetHWND())) return false;
 	if (!OnInitialize()) return false;
 
@@ -21,6 +22,7 @@ int GameLoop::Run()
 		if (!windows.PeekMSG()) break;
 
 		const float deltaTime = timer.GetDeltaTime();
+		Input.BeginFrame();
 		Update(deltaTime);
 
 		if (!Render()) return -1;
@@ -40,6 +42,11 @@ Graphics& GameLoop::GetGraphics()
 Windows& GameLoop::GetWindow()
 {
 	return windows;
+}
+
+InputManager& GameLoop::GetInput()
+{
+	return Input;
 }
 
 void GameLoop::RequestExit()

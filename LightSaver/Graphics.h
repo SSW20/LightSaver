@@ -54,6 +54,7 @@ public:
 		return 1;
 
 	}
+
 	Graphics() {};
 	~Graphics()
 	{
