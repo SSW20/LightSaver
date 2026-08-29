@@ -9280,3 +9280,693 @@ InputManager는 GameLoop가 직접 소유하므로 전역 객체나 Singleton이
 가장 중요한 한 문장은 다음과 같다.
 
 > InputManager는 키가 눌렸다는 사실만 수집하고, 그 입력이 전진·점프·메뉴 중 무엇을 의미하는지는 게임 코드가 결정한다.
+
+---
+
+## 2026-08-29: AABB 충돌, Raycast, 바닥 판정, 중력과 점프
+
+### 1. 이번 작업의 목표와 완료 범위
+
+이번 작업에서는 입력을 읽어 카메라를 움직이는 단계에서 더 나아가, 플레이어가 월드의 물체와 실제로 상호작용할 수 있는 최소 충돌 기반을 만들었다.
+
+```text
+BoxColliderComponent
+→ AABB 겹침 검사
+→ 벽 충돌과 벽 미끄러짐
+→ Ray와 AABB의 교차 검사
+→ World에서 가장 가까운 충돌 검색
+→ 카메라 중앙 상호작용 Ray
+→ 아래 방향 Ground Ray
+→ 중력과 점프
+```
+
+현재 구현은 완성된 범용 물리 엔진이 아니다. 포트폴리오 게임에 필요한 다음 기능을 직접 구현하고 원리를 이해하기 위한 작은 충돌 시스템이다.
+
+```text
+플레이어가 벽을 통과하지 않는다.
+카메라 앞에 무엇이 있는지 찾을 수 있다.
+플레이어가 바닥 위에 서고 바닥 밖에서는 추락한다.
+점프 후 중력에 의해 다시 착지한다.
+이 기반을 손전등 시야 판정과 발전기 상호작용에 재사용한다.
+```
+
+### 2. AABB란 무엇인가
+
+AABB는 `Axis-Aligned Bounding Box`의 약자다. 월드의 X, Y, Z축에 항상 평행한 직육면체 충돌 영역이다.
+
+```cpp
+struct AABB
+{
+    DirectX::XMFLOAT3 Min;
+    DirectX::XMFLOAT3 Max;
+};
+```
+
+`Min`은 상자의 각 축에서 가장 작은 좌표이고, `Max`는 가장 큰 좌표다.
+
+```text
+Min = (-1, 0, 3)
+Max = ( 1, 2, 5)
+
+X 범위: -1 ~ 1
+Y 범위:  0 ~ 2
+Z 범위:  3 ~ 5
+```
+
+복잡한 모델의 모든 삼각형을 검사하는 대신 단순한 상자로 먼저 검사하기 때문에 빠르고 구현하기 쉽다. 벽, 바닥, 발전기 상호작용 범위처럼 직육면체에 가까운 대상에 특히 적합하다.
+
+### 3. 중심점과 HalfSize로 플레이어 AABB 만들기
+
+플레이어 충돌 크기는 중심점과 중심에서 각 면까지의 거리인 `HalfSize`로 표현했다.
+
+```cpp
+const DirectX::XMFLOAT3 PlayerHalfSize =
+{
+    0.3f,
+    0.8f,
+    0.3f
+};
+```
+
+전체 크기는 각 값의 두 배다.
+
+```text
+폭   = 0.3 × 2 = 0.6
+높이 = 0.8 × 2 = 1.6
+깊이 = 0.3 × 2 = 0.6
+```
+
+중심점 `C`와 HalfSize `H`가 있다면 AABB는 다음과 같이 계산한다.
+
+```text
+Min = C - H
+Max = C + H
+```
+
+예를 들어 중심이 `(2, 1, 4)`, HalfSize가 `(0.3, 0.8, 0.3)`이라면 다음과 같다.
+
+```text
+Min = (1.7, 0.2, 3.7)
+Max = (2.3, 1.8, 4.3)
+```
+
+현재 `CreateAABBFromCenter`는 `XMLoadFloat3`, `XMVectorAdd`, `XMVectorSubtract`, `XMStoreFloat3`를 사용해 이 계산을 수행한다.
+
+### 4. 두 AABB가 겹치는지 판단하는 원리
+
+두 상자가 겹친다는 것을 직접 증명하기보다, 한 축이라도 완전히 떨어져 있다는 것을 찾는 편이 쉽다.
+
+X축에서 다음 조건 중 하나가 참이면 두 상자는 떨어져 있다.
+
+```text
+A.Max.x <= B.Min.x
+B.Max.x <= A.Min.x
+```
+
+같은 검사를 Y축과 Z축에도 적용한다. 세 축 중 하나라도 분리되어 있으면 충돌하지 않는다. 어떤 축에서도 분리되지 않았다면 세 축의 구간이 모두 겹치므로 두 상자가 충돌한다.
+
+```text
+X 겹침
+AND Y 겹침
+AND Z 겹침
+→ 3차원 상자 겹침
+```
+
+현재 구현은 `<=`를 사용하므로 면이 정확히 닿기만 한 상태는 겹침으로 취급하지 않는다. 이 선택은 벽 표면에 서 있거나 붙어 있을 때 불필요하게 충돌 상태가 지속되는 것을 줄인다. 접촉까지 충돌로 볼 것인지는 게임 규칙에 따라 달라질 수 있다.
+
+### 5. Local AABB와 World AABB
+
+컴포넌트가 저장하는 충돌 상자는 Actor 원점 기준인 Local 좌표다.
+
+```text
+모델 내부의 충돌 상자
+× Actor의 Scale, Rotation, Position
+→ 월드에서 실제 충돌 검사에 사용할 상자
+```
+
+`BoxColliderComponent::GetWorldCollisionBox()`는 Owner Actor의 World 행렬을 사용하여 Local 좌표를 World 좌표로 변환한다.
+
+현재 구현은 Local `Min`, `Max` 두 점만 변환한다. 이것은 이동과 양수 Scale만 사용하는 축 정렬 상자에서는 동작하지만, Actor가 회전하면 두 점만으로 새로운 AABB의 최소·최대 범위를 보장할 수 없다.
+
+회전까지 정확히 지원하려면 다음 방식이 필요하다.
+
+```text
+Local Box의 모서리 8개 생성
+→ 8개 모두 World 행렬로 변환
+→ 변환된 모든 점의 축별 최솟값/최댓값 검색
+→ 새로운 World AABB 생성
+```
+
+따라서 현재 충돌 상자는 회전하지 않는 벽과 바닥을 위한 1차 구현이며, 회전된 충돌체가 필요해질 때 8개 모서리 방식으로 확장한다.
+
+### 6. Actor::FindComponent와 dynamic_cast
+
+`World`는 Actor가 어떤 종류의 컴포넌트를 가지고 있는지 미리 알 수 없다. 충돌 검사에서는 각 Actor에서 `BoxColliderComponent`를 찾아야 한다.
+
+```cpp
+BoxColliderComponent* BoxCollider =
+    Actor->FindComponent<BoxColliderComponent>();
+```
+
+Actor의 `Components`에는 모두 `std::unique_ptr<Component>` 형태로 들어 있다. `get()`은 소유권을 넘기지 않고 내부의 원시 `Component*`만 꺼낸다.
+
+```cpp
+Comp.get()
+```
+
+그 포인터가 실제로 요청한 자식 타입인지 런타임에 검사하고 변환하는 것이 `dynamic_cast`다.
+
+```cpp
+dynamic_cast<BoxColliderComponent*>(Comp.get())
+```
+
+실제 객체가 `BoxColliderComponent`이면 해당 포인터를 반환하고, 다른 종류의 Component이면 `nullptr`를 반환한다.
+
+```text
+Component*가 실제로 BoxColliderComponent를 가리킴
+→ BoxColliderComponent* 반환
+
+Component*가 MeshComponent를 가리킴
+→ nullptr 반환
+```
+
+포인터 형식으로 캐스팅하는 이유는 실패를 `nullptr`로 표현할 수 있기 때문이다. `dynamic_cast<ComponentType>`처럼 객체 값 형식으로 작성하면 다형 객체를 안전하게 조회하려는 목적과 맞지 않는다.
+
+### 7. 이동하기 전에 예상 위치를 검사하는 이유
+
+충돌 처리는 먼저 이동한 뒤 무조건 되돌리는 대신, 이동할 위치를 먼저 만들어 검사한다.
+
+```text
+현재 위치
++ 이번 프레임 이동량
+= TestPosition
+
+TestPosition의 플레이어 AABB가 벽과 겹치는가?
+├── 아니오: 실제 위치에 적용
+└── 예: 해당 이동을 적용하지 않음
+```
+
+이 방식에서는 현재 위치를 안전한 마지막 위치로 유지할 수 있다.
+
+### 8. X와 Z를 따로 검사해야 벽을 따라 미끄러지는 이유
+
+X와 Z 이동을 합친 한 개의 AABB로 검사해 전체 이동을 취소하면 대각선으로 벽에 접근했을 때 두 축이 모두 멈춘다.
+
+```text
+원하는 이동 = X + Z
+벽 때문에 X만 막힘
+
+전체 이동을 한 번에 검사
+→ X와 Z 모두 취소
+→ 벽에 달라붙음
+```
+
+현재 코드는 X를 먼저 검사하여 성공한 값을 반영하고, 갱신된 위치를 기준으로 Z를 다시 검사한다.
+
+```text
+X 예상 위치 검사
+├── 성공: CameraPosition.x 갱신
+└── 실패: X 유지
+
+갱신된 CameraPosition으로 Z 예상 위치 검사
+├── 성공: CameraPosition.z 갱신
+└── 실패: Z 유지
+```
+
+벽이 X 방향 이동만 막더라도 Z 방향 이동은 살아 있기 때문에 플레이어가 벽 표면을 따라 움직일 수 있다. 이것을 흔히 wall sliding이라고 부른다.
+
+두 번째 검사에서 첫 번째 검사 결과가 반영된 `CameraPosition`을 사용하는 것도 중요하다. X 이동에 성공했는데 Z 검사가 이전 X 좌표를 사용하면, 실제 최종 위치와 다른 곳의 충돌을 검사하게 된다.
+
+### 9. 카메라 Pitch를 수평 이동에서 제거하는 순서
+
+FPS 이동에서 W는 카메라가 보는 방향을 따르지만, 위를 본다고 공중으로 날아가면 안 된다. 따라서 Forward의 Y를 0으로 만들고 다시 정규화한다.
+
+```text
+Camera Forward
+→ Y = 0
+→ Normalize
+→ 바닥과 평행한 전진 방향
+```
+
+Forward와 Right를 합친 뒤 Y를 제거하면 Pitch가 클수록 Forward의 수평 길이가 줄어들어 W+D에서 D 방향이 상대적으로 강해질 수 있다. 따라서 각각을 먼저 수평화하고 정규화한 후 입력 비율로 합치는 것이 안정적이다.
+
+대각선 입력은 입력 벡터의 길이가 1을 넘을 때 입력값을 길이로 나누어 보정한다.
+
+```text
+W만 입력: 길이 1
+W+D 입력: 길이 √2
+
+(W, D) / √2
+→ 대각선도 직선과 같은 속도
+```
+
+### 10. 이동을 막지 않는 Floor Collider
+
+바닥은 Raycast에는 검출되어야 하지만, 수평 이동용 `OverlapAABB`에서는 플레이어와 항상 맞닿거나 겹칠 수 있다. 그래서 `BoxColliderComponent`에 `bBlocksMovement`를 추가했다.
+
+```text
+Wall Collider
+→ bBlocksMovement = true
+→ OverlapAABB에서 플레이어 이동을 막음
+
+Floor Collider
+→ bBlocksMovement = false
+→ OverlapAABB에서는 건너뜀
+→ Raycast에서는 여전히 검출됨
+```
+
+하나의 충돌체가 모든 종류의 질의에 똑같이 반응할 필요는 없다. 이후에는 Collision Channel이나 Layer로 확장할 수 있지만, 현재는 필요한 규칙 하나를 bool로 표현했다.
+
+### 11. Ray의 수학적 표현
+
+Ray는 시작점과 방향으로 표현한다.
+
+```cpp
+struct Ray
+{
+    DirectX::XMFLOAT3 Origin;
+    DirectX::XMFLOAT3 Direction;
+};
+```
+
+Ray 위의 임의의 점은 다음 식으로 구한다.
+
+```text
+P(t) = Origin + Direction × t
+```
+
+`t`는 시작점에서 방향을 따라 얼마나 이동했는지를 나타낸다. Direction이 정규화되어 있다면 `t`는 거리로 해석할 수 있다.
+
+예를 들어 다음 Ray가 있다.
+
+```text
+Origin    = (0, 1, 0)
+Direction = (0, 0, 1)
+```
+
+`t = 5`일 때 점은 다음과 같다.
+
+```text
+P(5) = (0,1,0) + (0,0,1) × 5
+     = (0,1,5)
+```
+
+충돌 지점도 동일한 식으로 계산한다.
+
+```cpp
+HitPosition = Origin + Direction * TEnter;
+```
+
+### 12. Ray와 AABB의 Slab 알고리즘
+
+AABB를 X, Y, Z 세 방향의 두 평면 사이 공간으로 나누어 생각할 수 있다. 각 축의 공간을 Slab이라고 한다.
+
+```text
+X Slab: Box.Min.x ~ Box.Max.x
+Y Slab: Box.Min.y ~ Box.Max.y
+Z Slab: Box.Min.z ~ Box.Max.z
+```
+
+한 축에서 Ray가 최소 면과 최대 면을 만나는 `t`는 다음과 같다.
+
+```text
+t1 = (SlabMin - Origin) / Direction
+t2 = (SlabMax - Origin) / Direction
+```
+
+Ray가 음의 방향을 향하면 `t1`이 `t2`보다 커질 수 있으므로 두 값을 교환한다.
+
+```text
+축에 들어가는 시점 = min(t1, t2)
+축에서 나가는 시점 = max(t1, t2)
+```
+
+세 축에 모두 들어가 있는 공통 시간 구간을 찾는다.
+
+```text
+TEnter = 세 축 진입 시점 중 가장 큰 값
+TExit  = 세 축 이탈 시점 중 가장 작은 값
+```
+
+`TEnter <= TExit`이면 세 축 안에 동시에 존재하는 시간이 있으므로 Ray가 Box를 통과한다. 반대로 `TEnter > TExit`이면 축별 구간이 서로 겹치지 않아 충돌하지 않는다.
+
+```text
+X 안에 있는 구간: [2, 8]
+Y 안에 있는 구간: [3, 7]
+Z 안에 있는 구간: [4, 9]
+
+공통 구간: [4, 7]
+TEnter = 4, TExit = 7
+→ 충돌
+```
+
+### 13. Direction이 0에 가까울 때 나눗셈을 하지 않는 이유
+
+어떤 축의 Direction이 0이면 Ray는 그 축으로 움직이지 않는다.
+
+```text
+Direction.x = 0
+→ Ray의 X 좌표가 영원히 변하지 않음
+```
+
+이때 `(면 - Origin) / Direction`을 계산하면 0으로 나누게 된다. 부동소수점은 정확한 0 근처에서도 불안정할 수 있으므로 작은 Epsilon과 비교한다.
+
+```cpp
+if (std::abs(Direction) < Epsilon)
+```
+
+평행한 경우에는 Origin이 해당 축의 Slab 내부인지 확인한다.
+
+```text
+Origin이 Slab 안쪽
+→ 이 축은 Ray를 탈락시키지 않음
+
+Origin이 Slab 바깥쪽
+→ 평행하므로 영원히 Box에 들어갈 수 없음
+→ 충돌 실패
+```
+
+### 14. 충돌 Normal을 구하는 방법
+
+Ray가 Box에 최종적으로 들어가게 만든 축의 면 Normal을 `EnterNormal`에 저장한다.
+
+```text
+X 최소 면: (-1, 0, 0)
+X 최대 면: ( 1, 0, 0)
+Y 최소 면: ( 0,-1, 0)
+Y 최대 면: ( 0, 1, 0)
+Z 최소 면: ( 0, 0,-1)
+Z 최대 면: ( 0, 0, 1)
+```
+
+`TEnter`가 더 큰 값으로 갱신될 때 해당 면의 Normal도 함께 저장한다. 바닥의 윗면을 맞으면 Normal은 대략 `(0,1,0)`이 된다.
+
+```cpp
+OutHit.Normal.y > 0.8f
+```
+
+이 검사는 맞은 면이 충분히 위쪽을 향하는지 확인한다. 벽의 Normal은 Y가 0에 가까우므로 Ground로 인정되지 않는다. `0.8`은 완전히 수평인 면뿐 아니라 어느 정도 완만한 경사도 바닥으로 허용하는 기준이 된다.
+
+### 15. World::Raycast가 가장 가까운 Actor를 찾는 방식
+
+`RaycastAABB`는 Ray 하나와 Box 하나만 검사한다. 실제 게임에서는 World의 여러 Actor 중 가장 가까운 충돌을 찾아야 한다.
+
+```text
+World의 Actor 순회
+→ BoxColliderComponent 검색
+→ RaycastAABB 실행
+→ 현재 MaxDistance보다 가까운 충돌이면 결과 갱신
+→ MaxDistance를 새 Distance로 축소
+```
+
+가까운 충돌을 찾을 때마다 검색 가능 거리를 줄이므로 이후의 더 먼 충돌은 결과를 덮어쓰지 못한다. 마지막 `OutHit`에는 다음 정보가 남는다.
+
+```text
+Distance : Ray 시작점부터 충돌까지 거리
+Position : 월드 충돌 위치
+Normal   : 맞은 면의 방향
+HitActor : 맞은 Actor의 주소
+```
+
+카메라 중앙에서 Forward 방향으로 Ray를 발사하면 발전기 상호작용, 손전등과 몬스터 사이의 가림 검사, 사격 판정 등에 같은 함수를 재사용할 수 있다.
+
+### 16. Ground Ray와 바닥 판정
+
+플레이어 중심인 카메라 위치에서 아래 방향으로 Ray를 발사한다.
+
+```text
+Origin    = CameraPosition
+Direction = (0, -1, 0)
+```
+
+Ray가 바닥을 맞고 Normal의 Y가 충분히 크면 이번 프레임에 Ground 상태라고 판단한다.
+
+```text
+Raycast 성공
+AND HitNormal.y > 0.8
+AND 상승 중이 아님
+→ bGround = true
+```
+
+현재 `bGround`는 매 프레임 다시 계산되는 지역 변수다. Ground 여부는 Raycast 결과에서 파생되는 값이므로, 장기간 유지해야 하는 상태로 저장하지 않고 그 프레임의 결과로 사용할 수 있다.
+
+바닥에 있을 때 카메라 중심 높이는 다음과 같이 맞춘다.
+
+```text
+CameraPosition.y = 바닥 표면 Y + PlayerHalfSize.y
+```
+
+플레이어의 중심에서 아래쪽 끝까지 거리가 `PlayerHalfSize.y`이기 때문에 이 계산으로 발 위치가 바닥 표면에 맞는다.
+
+### 17. 중력은 위치가 아니라 속도를 변화시킨다
+
+중력은 매 프레임 위치에서 일정 값을 직접 빼는 것이 아니라 수직 속도를 변화시킨다.
+
+```cpp
+VerticalVelocity += Gravity * deltaTime;
+CameraPosition.y += VerticalVelocity * deltaTime;
+```
+
+흐름은 다음과 같다.
+
+```text
+가속도 Gravity
+× 시간
+→ 속도의 변화
+
+속도 VerticalVelocity
+× 시간
+→ 위치의 변화
+```
+
+`deltaTime`을 두 계산에 사용하므로 프레임 속도가 달라도 같은 실제 시간 동안 유사한 움직임이 나온다. 이것은 오일러 적분의 가장 단순한 형태다.
+
+### 18. 점프는 위치를 올리는 것이 아니라 초기 속도를 주는 것
+
+점프 키를 눌렀을 때 Y 위치를 바로 증가시키는 대신 `VerticalVelocity`에 양수인 초기 속도를 넣는다.
+
+```text
+점프 순간: VerticalVelocity = JumpSpeed
+그 이후:  Gravity가 매 프레임 속도를 감소
+최고점:   VerticalVelocity ≈ 0
+낙하:     VerticalVelocity < 0
+착지:     VerticalVelocity = 0
+```
+
+공중에서 계속 점프하는 것을 막기 위해 `bGround`일 때만 `IsKeyPressed(VK_SPACE)`를 받아들인다. `IsKeyDown`을 사용하면 키를 누르고 있는 여러 프레임 동안 점프 요청이 반복될 수 있다.
+
+점프 최고 높이는 공기 저항이 없다는 가정에서 대략 다음 식으로 계산할 수 있다.
+
+```text
+Height = JumpSpeed² / (2 × |Gravity|)
+```
+
+현재 값 `JumpSpeed = 5`, `Gravity = -9.8`이면 다음과 같다.
+
+```text
+Height ≈ 25 / 19.6 ≈ 1.28
+```
+
+### 19. 상승 중 Ground 판정을 막아야 하는 이유
+
+점프 직후에도 아래 방향 Ray는 잠시 바닥에 닿을 수 있다. 이때 Ray가 닿았다는 이유만으로 Ground 처리하면 다음 코드가 실행된다.
+
+```cpp
+VerticalVelocity = 0.0f;
+```
+
+그러면 방금 넣은 점프 속도가 바로 사라져 플레이어가 들썩이고 멈춘다. 따라서 현재 구현은 다음 조건을 먼저 확인한다.
+
+```cpp
+VerticalVelocity <= 0.0f
+```
+
+즉, 최고점을 지나 아래로 내려오는 중일 때만 착지를 허용한다.
+
+### 20. `bool JumpSpeed` 때문에 점프가 거의 되지 않았던 문제
+
+점프 속도를 처음 추가할 때 자료형을 다음처럼 잘못 선언했다.
+
+```cpp
+bool JumpSpeed = 1000.0f;
+```
+
+`bool`은 실수를 저장하지 않고 `false` 또는 `true`만 저장한다. 0이 아닌 `1000.0f`는 `true`로 변환되고, 이것을 다시 float 속도에 대입하면 `1.0f`가 된다.
+
+```text
+1000.0f
+→ bool true
+→ float 1.0f
+```
+
+따라서 숫자를 아무리 크게 적어도 실제 점프 속도는 1이었고, 최고 높이는 약 5cm에 불과했다. 속도처럼 연속적인 수치를 저장할 값은 `float`이어야 한다.
+
+```cpp
+float JumpSpeed = 5.0f;
+```
+
+이 문제는 컴파일 오류가 아니라 암시적 자료형 변환으로 인해 정상 컴파일되는 논리 오류였다. 변수 이름만 보는 것이 아니라 자료형이 표현할 수 있는 값의 범위를 함께 확인해야 한다.
+
+### 21. 착지할 때 갑자기 바닥으로 붙었던 이유
+
+플레이어 중심에서 발까지의 거리는 `PlayerHalfSize.y = 0.8`인데 Ground Ray 길이를 `1.0`으로 사용하면 발이 바닥에서 최대 0.2 떨어진 상태에서도 바닥을 검출한다.
+
+```text
+카메라 중심
+│ 0.8 : 중심부터 발까지
+발
+│ 0.2 : 아직 남은 공중 거리
+바닥
+```
+
+이 순간 위치를 바로 `HitY + HalfSizeY`로 바꾸면 남은 0.2를 순간적으로 이동하여 착지가 부자연스럽게 보인다.
+
+현재는 Ground 검사 거리를 `0.85`로 줄였다.
+
+```text
+PlayerHalfSize.y 0.8
++ GroundTolerance 0.05
+= GroundCheckDistance 0.85
+```
+
+이제 발과 바닥의 간격이 약 5cm 이내일 때만 스냅한다. 향후에는 하드코딩한 `0.85f` 대신 다음처럼 의미가 드러나는 값으로 구성하는 편이 좋다.
+
+```cpp
+GroundCheckDistance = PlayerHalfSize.y + GroundTolerance;
+```
+
+더 빠른 낙하까지 정확히 처리하려면 이번 프레임의 예상 Y 이동량을 포함한 Sweep 또는 다음 위치 기반 충돌 검사가 필요하다. 물리 위치는 접촉 순간 정확히 고정하고, 착지 충격과 부드러운 화면 반응은 별도의 카메라 연출로 처리하는 것이 일반적이다.
+
+### 22. 디버거에서 Ground 값이 이상해 보였던 과정
+
+Ground 문제를 조사하는 동안 다음 사항이 겹쳤다.
+
+```text
+Visual Studio 편집기에는 아직 저장하지 않은 코드가 존재
+외부 도구는 디스크에 마지막으로 저장된 파일을 읽음
+빌드는 빌드를 시작한 시점의 저장 파일을 컴파일
+중단점은 실행 전/후 위치에 따라 대입 이전 값 또는 이후 값을 표시
+```
+
+따라서 디버깅 전에 `Ctrl+S`로 저장하고, 중단점 화살표가 현재 줄을 실행하기 전인지 실행한 후인지 구분해야 한다.
+
+Raycast가 false인지 확인할 때는 bool 하나만 보지 말고 `OutHit`도 함께 확인하는 것이 좋다.
+
+```text
+Distance
+Position
+Normal
+HitActor
+```
+
+모든 값이 0이고 `HitActor == nullptr`이면 유효한 충돌 결과가 만들어지지 않은 상태다.
+
+### 23. UTF-8 소스가 CP949로 해석되어 선언이 사라졌던 문제
+
+`LightSaverGame.cpp`에는 UTF-8 한글 주석이 있었지만 MSVC는 한국어 Windows 기본 코드 페이지인 CP949로 파일을 해석하고 있었다. 빌드에는 다음 경고가 있었다.
+
+```text
+C4819: 현재 코드 페이지(949)에서 표시할 수 없는 문자가 파일에 들어 있습니다.
+```
+
+영문과 C++ 기호는 UTF-8과 CP949에서 같은 ASCII 바이트를 사용하므로 평소에는 문제가 드러나지 않았다. 한글 주석 주변을 수정한 뒤 잘못된 문자 해석이 컴파일러의 전처리 과정에 영향을 주면서 바로 다음 지역 변수 선언이 전처리 결과에서 사라졌다.
+
+화면에는 선언이 있었지만 컴파일러는 사용 부분에서 다음 오류를 냈다.
+
+```text
+C2065: 'bGround': 선언되지 않은 식별자입니다.
+```
+
+전처리 결과를 비교하여 원인을 확인했다.
+
+```text
+기본 CP949 해석
+→ bool bGround = false; 선언이 전처리 결과에서 누락
+
+/utf-8 적용
+→ 선언이 정상적으로 유지
+→ 전체 빌드 성공
+```
+
+프로젝트의 Debug/Release, Win32/x64 모든 구성에 다음 컴파일 옵션을 추가했다.
+
+```text
+/utf-8
+```
+
+이 옵션은 컴파일러가 소스 문자 집합과 실행 문자 집합을 UTF-8로 처리하도록 명시한다. Visual Studio 편집기가 파일을 올바르게 표시하는 것과 `cl.exe`가 어떤 인코딩으로 컴파일하는 것은 별개의 문제이므로 프로젝트 설정으로 명시하는 편이 안전하다.
+
+### 24. 현재 프레임의 플레이어 이동 순서
+
+현재 `LightSaverGame::Update`에서 플레이어 이동은 다음 순서로 처리된다.
+
+```text
+WASD 입력값 계산
+→ 대각선 입력 길이 보정
+→ Forward/Right 수평화와 정규화
+→ 이번 프레임 XZ 이동량 계산
+→ X 예상 위치 충돌 검사와 반영
+→ 갱신된 위치에서 Z 예상 위치 충돌 검사와 반영
+→ 아래 방향 Ground Ray
+→ Ground이면 높이와 수직 속도 보정
+→ Ground에서 Space Pressed이면 점프 속도 설정
+→ 공중이면 중력과 Y 이동 적용
+→ 최종 CameraPosition 저장
+→ 마우스 Delta로 카메라 회전
+→ World Update
+```
+
+기능은 동작하지만 `LightSaverGame`이 입력, 이동, 충돌, 중력, 점프까지 모두 처리하고 있다. 다음 구조 단계에서는 이 책임을 PlayerController와 PlayerActor 쪽으로 옮긴다.
+
+### 25. 현재 구조의 한계와 다음 작업
+
+현재 구현에서 의도적으로 남겨 둔 한계는 다음과 같다.
+
+```text
+회전된 Actor의 AABB는 8개 모서리를 사용하지 않아 정확하지 않음
+플레이어 충돌 크기와 Ground 거리 일부가 게임 코드에 하드코딩됨
+매 프레임 World의 모든 Actor를 선형 순회함
+빠른 수직 이동에 대한 Sweep이 없음
+천장 충돌이 없음
+LightSaverGame::Update에 플레이어 코드가 집중됨
+```
+
+현재 규모에서는 전체 Actor 선형 순회가 충분히 단순하고 빠르다. 실제 병목을 확인하기 전에 공간 분할 구조를 도입하지 않는다.
+
+다음 작업 순서는 다음과 같다.
+
+```text
+PlayerController 생성
+→ CameraSpeed, MouseSpeed, VerticalVelocity, Gravity, JumpSpeed 이동
+→ 입력과 플레이어 이동 코드 분리
+→ PlayerActor가 위치와 Camera를 소유하도록 연결
+→ MonsterActor 추적 구현
+→ 손전등 Cone 안에 있는지 검사
+→ Raycast로 벽에 가려졌는지 검사
+→ 보이고 빛을 받으면 정지, 아니면 이동
+→ 발전기 상호작용
+```
+
+### 오늘의 핵심 요약
+
+```text
+AABB는 Min/Max로 표현되는 축 정렬 충돌 상자다.
+세 축 중 하나라도 분리되어 있으면 두 AABB는 충돌하지 않는다.
+X와 Z를 순서대로 따로 검사하면 막히지 않은 축으로 벽을 따라 이동한다.
+Actor::FindComponent는 dynamic_cast로 원하는 Component 타입을 찾는다.
+Ray는 P(t) = Origin + Direction × t로 표현한다.
+Slab 알고리즘은 X/Y/Z 축별 Ray 진입·이탈 구간의 공통 구간을 찾는다.
+World::Raycast는 MaxDistance를 줄이며 가장 가까운 Actor를 선택한다.
+Floor는 Overlap 이동을 막지 않지만 Raycast에는 검출되도록 분리했다.
+Ground Ray의 Normal.y로 바닥과 벽을 구분한다.
+중력은 속도를, 속도는 위치를 시간에 따라 변화시킨다.
+점프는 Y 위치를 직접 올리는 것이 아니라 양의 초기 수직 속도를 주는 것이다.
+상승 중 Ground 판정을 허용하면 점프 속도가 즉시 0으로 초기화된다.
+Ground Ray가 너무 길면 실제 접촉 전에 바닥으로 스냅된다.
+bool은 점프 속도 같은 연속적인 수치를 저장할 수 없다.
+UTF-8 소스를 CP949로 컴파일하지 않도록 프로젝트에 /utf-8을 명시했다.
+```
+
+가장 중요한 흐름은 다음 한 줄로 정리할 수 있다.
+
+> 입력으로 원하는 이동을 만들고, 충돌 질의로 허용 가능한 이동만 적용하며, Raycast 결과를 게임 규칙인 Ground·상호작용·시야 판정으로 해석한다.

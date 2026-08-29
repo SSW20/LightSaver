@@ -42,6 +42,26 @@ DirectX::XMVECTOR Camera::GetCameraPosition() const
     return DirectX::XMLoadFloat3(&Position);
 }
 
+void Camera::SetCameraPosition(const DirectX::XMFLOAT3& Pos)
+{
+    Position = Pos;
+}
+
+void Camera::SetCameraPositionX(float PosX)
+{
+    Position.x = PosX;
+}
+
+void Camera::SetCameraPositionY(float PosY)
+{
+    Position.y = PosY;
+}
+
+void Camera::SetCameraPositionZ(float PosZ)
+{
+    Position.z = PosZ;
+}
+
 
 void Camera::AddForward(float distance)
 {

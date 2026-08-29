@@ -11,13 +11,16 @@ public:
 	DirectX::XMMATRIX GetProjectionMatrix() const;
 
 	DirectX::XMVECTOR GetCameraPosition() const;
+	void SetCameraPosition(const DirectX::XMFLOAT3& Pos);
+	void SetCameraPositionX(float PosX);
+	void SetCameraPositionY(float PosY);
+	void SetCameraPositionZ(float PosZ);
 
-
-	void AddForward(float distance);
 	void AddRight(float distance);
+	void AddForward(float distance);
 	void AddRotation(float yawDelta, float pitchDelta);
 private:
-	DirectX::XMFLOAT3 Position = { 0.0f, 0.0f, -3.0f };
+	DirectX::XMFLOAT3 Position = { 0.0f, 0.85f, 0.0f };
 	float Yaw = 0.0f;
 	float Pitch = 0.0f;
 	float FovY = DirectX::XM_PIDIV4;

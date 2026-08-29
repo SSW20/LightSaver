@@ -47,7 +47,6 @@ void InputManager::BeginFrame()
 	MouseDeltaY = MousePos.y - Center.y;
 
 	SetCursorPos(Center.x, Center.y);
-	ShowCursor(FALSE);
 }
 
 bool InputManager::IsKeyDown(int Key)

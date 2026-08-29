@@ -14,6 +14,10 @@ public:
 	template<typename ComponentType, typename... Args>
 	ComponentType* AddComponent(Args&& ...Arguments);
 
+	template<typename ComponentType>
+	ComponentType* FindComponent();
+
+
 	const std::vector<std::unique_ptr<Component>>& GetComponents() const { return Components; }
 	void CollectRenderObjects(std::vector<RenderObject>& OutRenderObjects) const;
 
@@ -31,4 +35,19 @@ inline ComponentType* Actor::AddComponent(Args && ...Arguments)
 	ComponentType* ComponentAddr = NewComponent.get();
 	Components.push_back(std::move(NewComponent));
 	return ComponentAddr;
+}
+
+template<typename ComponentType>
+inline ComponentType* Actor::FindComponent()
+{
+	for (const auto& Comp : Components)
+	{
+		ComponentType* FindComp = dynamic_cast<ComponentType*>(Comp.get());
+		if (FindComp != nullptr)
+		{
+			return FindComp;
+		}
+		else continue;
+	}
+	return nullptr;
 }

@@ -10,6 +10,7 @@
 #include "Transform.h"
 #include "World.h"
 #include "Renderer.h"
+#include "BoxColliderComponent.h"
 
 class Actor;
 class MeshComponent;
@@ -22,6 +23,7 @@ public:
 	virtual bool Render() override;
 
 	~LightSaverGame() override;
+
 
 private:
 
@@ -37,4 +39,7 @@ private:
 	World GameWorld;
 	Actor* SpiderActor;
 	Renderer RenderManager;
+	float VerticalVelocity = 0.0f;
+	float Gravity = -9.8f;
+	float JumpSpeed = 5.0f;
 };

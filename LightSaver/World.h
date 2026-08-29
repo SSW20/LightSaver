@@ -2,7 +2,7 @@
 #include <vector>
 #include <memory>
 #include "Actor.h"
-
+#include "CollisionTypes.h"
 
 class World
 {
@@ -15,6 +15,8 @@ public:
 	template<typename ActorType>
 	inline ActorType* SpawnActor();
 
+	bool Raycast(const Ray& TestRay, float MaxDistance, RaycastHitResult& OutHit);
+	bool OverlapAABB(const AABB& TestBox);
 	void CollectRenderObjects(std::vector<RenderObject>& OutRenderObjects) const;
 private:
 	std::vector<std::unique_ptr<Actor>> Actors;
