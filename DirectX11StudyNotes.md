@@ -9970,3 +9970,345 @@ UTF-8 소스를 CP949로 컴파일하지 않도록 프로젝트에 /utf-8을 명
 가장 중요한 흐름은 다음 한 줄로 정리할 수 있다.
 
 > 입력으로 원하는 이동을 만들고, 충돌 질의로 허용 가능한 이동만 적용하며, Raycast 결과를 게임 규칙인 Ground·상호작용·시야 판정으로 해석한다.
+
+## 2026-08-30: PlayerController와 PlayerActor 분리
+
+### 1. 이번 작업의 목표
+
+이전에는 `LightSaverGame::Update()`가 다음 일을 모두 직접 처리했다.
+
+```text
+키보드 입력 해석
+마우스 입력으로 카메라 회전
+수평 이동량 계산
+벽 충돌 검사
+바닥 Raycast
+중력과 점프
+상호작용 Raycast
+```
+
+기능은 정상적으로 작동했지만 `LightSaverGame`이 게임 전체 실행뿐 아니라 플레이어의 세부 행동까지 알고 있었다. 이 상태가 계속되면 몬스터, 발전기, 문, 아이템이 추가될 때 하나의 클래스가 너무 많은 책임을 갖게 된다.
+
+이번 작업에서는 역할을 다음처럼 나눴다.
+
+```text
+LightSaverGame
+└─ 게임에 필요한 객체를 만들고 전체 시스템의 실행 순서를 연결
+
+PlayerController
+└─ 입력을 해석하여 조종 중인 플레이어에게 행동을 명령
+
+PlayerActor
+├─ 월드에 존재하는 실제 플레이어의 위치를 소유
+└─ 플레이어가 사용하는 Camera를 소유
+
+Camera
+└─ View/Projection 계산과 바라보는 방향을 담당
+```
+
+핵심은 코드를 파일별로 나눈 것이 아니라 **변경 이유가 같은 데이터와 기능을 같은 객체에 모은 것**이다.
+
+### 2. PlayerController가 담당하는 것
+
+`PlayerController`는 물리적인 몸이 아니라 플레이어의 입력을 해석하는 조종자다. 현재 다음 상태와 로직을 가진다.
+
+```text
+CameraSpeed
+MouseSpeed
+VerticalVelocity
+Gravity
+JumpSpeed
+PlayerHalfSize
+
+UpdateMovement
+UpdateVerticalMovement
+UpdateRotation
+UpdateInteraction
+```
+
+한 프레임의 업데이트는 다음 순서로 진행된다.
+
+```text
+PlayerController::Update
+├─ UpdateMovement
+│  ├─ WASD 입력값 계산
+│  ├─ Forward/Right로 이동 방향 계산
+│  ├─ X/Z 예상 위치의 AABB 충돌 검사
+│  └─ 허용된 PlayerActor 위치 적용
+├─ UpdateVerticalMovement
+│  ├─ Ground Raycast
+│  ├─ 점프 입력 확인
+│  ├─ 중력으로 수직 속도 변경
+│  └─ PlayerActor의 Y 위치 적용
+├─ UpdateRotation
+│  └─ 마우스 Delta로 Camera의 Yaw/Pitch 변경
+└─ UpdateInteraction
+   └─ Camera 위치와 Forward로 상호작용 Ray 발사
+```
+
+이 순서에서는 이동과 수직 위치가 먼저 확정되고, 마우스 회전이 적용된 다음, 최신 카메라 방향으로 상호작용 Ray를 발사한다.
+
+### 3. PlayerActor가 담당하는 것
+
+`PlayerActor`는 `Actor`를 상속하므로 `World` 안에 존재할 수 있다. 현재는 플레이어 모델을 렌더링하지 않지만 다음 두 가지 핵심 상태를 소유한다.
+
+```cpp
+Camera PlayerCamera;
+DirectX::XMFLOAT3 CameraOffset = { 0.0f, 0.65f, 0.0f };
+```
+
+실제 플레이어의 월드 위치는 상속받은 `ActorTransform.Position`에 저장한다.
+
+```text
+PlayerActor::ActorTransform.Position
+= 충돌하고 이동하며 중력의 영향을 받는 몸의 중심
+```
+
+Camera는 플레이어의 몸 자체가 아니라 그 몸에 붙은 관찰 지점이다.
+
+```text
+PlayerCamera.Position
+= 화면을 바라보는 눈의 위치
+```
+
+두 개념을 분리하면 나중에 앉기, 카메라 흔들림, 착지 충격, 머리 흔들림을 추가해도 플레이어의 충돌 위치를 불필요하게 흔들지 않을 수 있다.
+
+### 4. World가 소유하고 다른 객체는 가리키기만 한다
+
+플레이어 생성 코드는 다음 흐름으로 실행된다.
+
+```cpp
+MainPlayer = GameWorld.SpawnActor<PlayerActor>();
+MainPlayer->SetPlayerPosition({ 0.0f, 0.85f, 0.0f });
+MainPlayerController.Possess(MainPlayer);
+```
+
+실제 소유 관계는 다음과 같다.
+
+```text
+World
+└─ unique_ptr<PlayerActor>
+   └─ Camera
+```
+
+`World`가 가진 `unique_ptr`가 `PlayerActor`의 수명을 책임진다. 반면 다음 포인터는 소유하지 않는다.
+
+```text
+LightSaverGame::MainPlayer
+PlayerController::ControlledPlayer
+PlayerController::MainCamera
+```
+
+이 포인터들은 이미 존재하는 객체를 찾아가기 위한 주소다. 따라서 `delete`하면 안 된다. `World`가 사라지기 전에만 사용해야 하며, 연결을 해제할 때는 `nullptr`로 변경해야 한다.
+
+```text
+소유 포인터    = 객체의 생성과 파괴 책임을 가짐
+비소유 포인터  = 객체를 사용하기 위해 주소만 기억함
+```
+
+### 5. Possess의 의미
+
+`Possess`는 Controller가 어떤 PlayerActor를 조종할지 연결하는 함수다.
+
+```cpp
+void PlayerController::Possess(PlayerActor* InPlayer)
+```
+
+연결되면 Controller는 플레이어 주소와 그 플레이어가 소유한 Camera 주소를 기억한다.
+
+```text
+ControlledPlayer → 위치, 충돌, 점프 대상
+MainCamera       → 이동 방향, 회전, 상호작용 Ray 방향
+```
+
+`Possess(nullptr)`가 호출되면 기존 Camera 포인터도 `nullptr`로 지워야 한다. PlayerActor는 없는데 이전 Camera 주소만 남아 있으면 Controller가 더 이상 유효하지 않은 객체에 접근할 가능성이 있기 때문이다.
+
+이 구조는 나중에 다음 기능으로 확장할 수 있다.
+
+```text
+플레이어 사망 후 관전 대상 변경
+다른 캐릭터 조종
+고정된 감시 카메라 조종
+메뉴나 컷신용 카메라 전환
+```
+
+### 6. 위치의 기준을 하나로 정해야 하는 이유
+
+처음에는 플레이어의 이동 결과가 `Camera.Position`에 직접 저장됐다. PlayerActor를 추가한 뒤에도 Camera와 Actor가 각각 독립적으로 위치를 갖게 두면 다음 문제가 생긴다.
+
+```text
+Actor.Position  = (1, 0.85, 5)
+Camera.Position = (3, 1.50, 8)
+```
+
+이때 충돌 검사는 Actor 위치를 사용하고 화면은 Camera 위치에서 보게 되어, 눈으로 보는 장소와 실제 충돌하는 장소가 달라진다.
+
+따라서 이번 구조에서는 다음 규칙을 사용한다.
+
+```text
+플레이어 위치의 원본 = PlayerActor::ActorTransform.Position
+Camera 위치          = 플레이어 위치로부터 계산된 결과
+```
+
+Controller는 위치를 바꿀 때 Camera를 직접 수정하지 않고 다음 함수를 호출한다.
+
+```cpp
+ControlledPlayer->SetPlayerPosition(PlayerPosition);
+```
+
+이 함수 하나가 Actor 위치와 Camera 위치를 함께 갱신하므로 두 값이 서로 어긋나지 않는다.
+
+### 7. 몸 중심과 카메라 눈높이
+
+플레이어의 충돌 반크기는 현재 다음과 같다.
+
+```cpp
+PlayerHalfSize = { 0.3f, 0.8f, 0.3f };
+```
+
+바닥 위에 서 있는 몸 중심이 `y = 0.85`라면 발은 대략 다음 높이에 있다.
+
+```text
+몸 중심 0.85 - 반높이 0.8 = 발 위치 0.05
+```
+
+Camera를 몸 중심과 같은 위치에 두면 시점이 지나치게 낮다. 따라서 Camera에만 다음 오프셋을 더한다.
+
+```cpp
+CameraOffset = { 0.0f, 0.65f, 0.0f };
+```
+
+계산 결과는 다음과 같다.
+
+```text
+PlayerPosition.y = 0.85
+CameraOffset.y   = 0.65
+CameraPosition.y = 1.50
+```
+
+코드의 수학은 단순한 벡터 덧셈이다.
+
+```text
+CameraPosition = PlayerPosition + CameraOffset
+```
+
+각 축으로 풀어쓰면 다음과 같다.
+
+```cpp
+CameraPosition.x = NewPosition.x + CameraOffset.x;
+CameraPosition.y = NewPosition.y + CameraOffset.y;
+CameraPosition.z = NewPosition.z + CameraOffset.z;
+```
+
+계산한 뒤에는 반드시 `CameraPosition`을 Camera에 전달해야 한다. `NewPosition`을 전달하면 위에서 오프셋을 계산했더라도 그 결과를 버리는 셈이 된다.
+
+### 8. 어떤 위치를 어느 기능에 사용해야 하는가
+
+몸과 눈의 위치가 분리됐으므로 기능마다 올바른 위치를 선택해야 한다.
+
+| 기능 | 사용하는 위치 | 이유 |
+|---|---|---|
+| 벽 충돌 | PlayerActor 위치 | 충돌하는 것은 몸이기 때문 |
+| Ground Ray | PlayerActor 위치 | 몸 중심부터 발 아래를 검사하기 때문 |
+| 중력과 점프 | PlayerActor 위치 | 움직이는 대상은 몸이기 때문 |
+| 화면 렌더링 | Camera 위치 | 눈에서 장면을 바라보기 때문 |
+| 상호작용 Ray | Camera 위치 | 화면 중앙에서 조준하기 때문 |
+| 손전등 위치와 방향 | Camera 위치/Forward | 손전등이 시점과 함께 움직이기 때문 |
+
+Ground Ray를 Camera의 눈높이에서 시작하면서 기존의 `PlayerHalfSize.y` 거리만 검사하면 바닥까지 도달하지 못한다. 그래서 바닥 검사는 계속 PlayerActor의 몸 중심에서 시작해야 한다.
+
+### 9. Render에서 Camera를 얻는 경로
+
+이전에는 `LightSaverGame`이 `MainCamera`를 직접 소유했다. 지금은 PlayerActor가 Camera를 소유하므로 렌더 경로도 바뀌었다.
+
+```cpp
+RenderManager.Render(GameWorld, MainPlayer->GetCamera());
+```
+
+전체 경로는 다음과 같다.
+
+```text
+LightSaverGame::Render
+→ MainPlayer
+→ PlayerActor::GetCamera
+→ Renderer
+→ Camera의 View/Projection 행렬
+```
+
+`MainPlayer`가 `nullptr`이면 Camera를 가져올 수 없으므로 먼저 검사하고 렌더를 중단한다.
+
+### 10. 이번 리팩터링 후 LightSaverGame의 역할
+
+`LightSaverGame::Update()`는 이제 플레이어의 세부 수학을 직접 계산하지 않는다.
+
+```cpp
+MainPlayerController.Update(deltaTime, GetInput(), GameWorld);
+GameWorld.Update(deltaTime);
+```
+
+게임 클래스는 시스템과 객체를 연결하고 큰 실행 순서를 결정한다. 실제 플레이어 행동은 PlayerController와 PlayerActor가 처리한다.
+
+```text
+이전
+LightSaverGame = 게임 실행 + 플레이어 입력 + 이동 + 충돌 + 점프 + 상호작용
+
+현재
+LightSaverGame = 게임 실행 순서와 객체 연결
+PlayerController = 입력 해석과 행동 결정
+PlayerActor = 플레이어 몸과 Camera 소유
+```
+
+### 11. 빌드 중 vc143.pdb C1041 오류
+
+코드 확인 중 다음 오류가 발생할 수 있다.
+
+```text
+C1041: 프로그램 데이터베이스 vc143.pdb를 열 수 없습니다.
+여러 CL.EXE에서 동일한 PDB 파일에 쓰는 경우 /FS를 사용하십시오.
+```
+
+이번 경우에는 코드 문법 오류가 아니라 Visual Studio와 외부 MSBuild가 같은 프로젝트를 동시에 빌드하면서 Debug PDB 파일을 함께 사용하려 한 것이 원인이었다.
+
+```text
+Visual Studio 빌드 또는 실행 중
++ 외부 MSBuild 실행
+→ 두 컴파일 작업이 같은 vc143.pdb에 쓰려고 함
+→ C1041
+```
+
+먼저 진행 중인 실행과 빌드를 중지한 뒤 하나의 빌드만 수행한다. 문제가 반복되는 환경에서는 `/FS`를 검토할 수 있지만, 단순한 동시 빌드 문제라면 프로젝트 옵션을 추가하기 전에 중복 빌드부터 제거하는 것이 맞다.
+
+### 12. 다음 구조 단계
+
+플레이어 분리 이후에는 몬스터가 자신의 매 프레임 행동을 실행할 수 있어야 한다. 현재 `Actor::Update()`는 Component만 순회하므로 자식 Actor의 고유 로직을 넣을 진입점이 필요하다.
+
+예정된 흐름은 다음과 같다.
+
+```text
+Actor::Update
+├─ 자식 Actor의 OnUpdate
+└─ Component Update 순회
+
+MonsterActor::OnUpdate
+├─ 플레이어 방향 계산
+├─ 손전등 Cone 판정
+├─ 벽 가림 Raycast 판정
+└─ 보이면 정지, 보이지 않으면 추적
+```
+
+`Actor::Update()`가 공통 흐름을 유지하고 자식은 `OnUpdate()`만 재정의하게 만들면, 자식이 부모 함수를 호출하지 않아 Component 업데이트가 빠지는 실수를 막을 수 있다. 이는 공통 알고리즘의 뼈대는 부모가 유지하고 일부 단계만 자식이 바꾸는 Template Method 형태다.
+
+### 오늘의 핵심 요약
+
+```text
+Controller는 입력을 해석하는 조종자이고 Actor는 월드에 존재하는 몸이다.
+PlayerActor는 플레이어 위치와 Camera를 소유한다.
+World의 unique_ptr가 PlayerActor의 실제 수명을 책임진다.
+LightSaverGame과 PlayerController의 일반 포인터는 소유하지 않고 가리키기만 한다.
+Possess는 Controller와 조종 대상을 연결한다.
+플레이어 위치의 원본은 ActorTransform.Position 하나로 정했다.
+Camera 위치는 PlayerPosition + CameraOffset으로 계산한다.
+충돌·Ground·중력은 몸 위치를 사용하고 렌더·조준·손전등은 Camera 위치를 사용한다.
+LightSaverGame은 세부 플레이어 로직 대신 전체 실행 순서를 연결한다.
+다음 단계는 Actor 공통 Update 안에 자식별 OnUpdate 진입점을 추가하는 것이다.
+```

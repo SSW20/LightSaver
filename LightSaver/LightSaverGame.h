@@ -11,6 +11,7 @@
 #include "World.h"
 #include "Renderer.h"
 #include "BoxColliderComponent.h"
+#include "PlayerController.h"
 
 class Actor;
 class MeshComponent;
@@ -26,20 +27,13 @@ public:
 
 
 private:
-
-
 	float Rotation = 0.0f;
-	float CameraSpeed = 3.0f;
-	// 픽셀당 회전할 라디안 값
-	float MouseSpeed = DirectX::XMConvertToRadians(0.1f);
-	Camera MainCamera;
+	PlayerController MainPlayerController;
+	PlayerActor* MainPlayer = nullptr;
 	Model SpiderModel; 
 	Model FloorModel; 
 	Model WallModel;
 	World GameWorld;
 	Actor* SpiderActor;
 	Renderer RenderManager;
-	float VerticalVelocity = 0.0f;
-	float Gravity = -9.8f;
-	float JumpSpeed = 5.0f;
 };
