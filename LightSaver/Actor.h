@@ -22,6 +22,8 @@ public:
 	void CollectRenderObjects(std::vector<RenderObject>& OutRenderObjects) const;
 
 	virtual ~Actor();
+protected:
+	virtual void OnUpdate(float DeltaTime);
 private:
 	Transform ActorTransform;
 	std::vector<std::unique_ptr<Component>> Components;

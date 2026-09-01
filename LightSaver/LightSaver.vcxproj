@@ -146,8 +146,11 @@
     <ClCompile Include="LightSaverGame.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Mesh.cpp" />
+    <ClCompile Include="MeshColliderComponent.cpp" />
     <ClCompile Include="MeshComponent.cpp" />
     <ClCompile Include="Model.cpp" />
+    <ClCompile Include="MonsterActor.cpp" />
+    <ClCompile Include="NavigationGrid.cpp" />
     <ClCompile Include="PlayerActor.cpp" />
     <ClCompile Include="PlayerController.cpp" />
     <ClCompile Include="Renderer.cpp" />
@@ -175,8 +178,11 @@
     <ClInclude Include="InputManager.h" />
     <ClInclude Include="LightSaverGame.h" />
     <ClInclude Include="Mesh.h" />
+    <ClInclude Include="MeshColliderComponent.h" />
     <ClInclude Include="MeshComponent.h" />
     <ClInclude Include="Model.h" />
+    <ClInclude Include="MonsterActor.h" />
+    <ClInclude Include="NavigationGrid.h" />
     <ClInclude Include="PlayerActor.h" />
     <ClInclude Include="PlayerController.h" />
     <ClInclude Include="Renderer.h" />

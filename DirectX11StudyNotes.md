@@ -10312,3 +10312,376 @@ Camera 위치는 PlayerPosition + CameraOffset으로 계산한다.
 LightSaverGame은 세부 플레이어 로직 대신 전체 실행 순서를 연결한다.
 다음 단계는 Actor 공통 Update 안에 자식별 OnUpdate 진입점을 추가하는 것이다.
 ```
+
+## 2026-09-01: Mesh 지형 충돌, 지형 추적 몬스터, NavigationGrid 기초
+
+### 1. 이번 작업의 목표
+
+이번 작업에서는 단순한 평면 Box 바닥을 벗어나 실제 삼각형으로 구성된 굴곡 지형 위에서 플레이어와 몬스터가 움직일 수 있도록 충돌 구조를 확장했다. 그 위에 몬스터가 벽을 피해 플레이어에게 갈 수 있도록 Grid 기반 Navigation의 기초 데이터도 만들기 시작했다.
+
+전체 흐름은 다음과 같다.
+
+```text
+Model이 보관한 CPU 정점/인덱스
+→ MeshColliderComponent가 월드 삼각형으로 변환
+→ World::Raycast가 Box와 Mesh 중 가장 가까운 충돌 반환
+→ World::FindFloor가 바닥 탐색을 공통 기능으로 제공
+→ PlayerController와 MonsterActor가 같은 바닥 탐색 사용
+→ NavigationGrid가 맵을 이동 가능/불가능 셀로 Bake
+→ 이후 A*가 셀 연결을 이용해 경로 탐색
+```
+
+### 2. Actor의 공통 Update와 자식별 OnUpdate
+
+기존 Actor는 Component 목록만 갱신했다. MonsterActor처럼 Actor 자체의 행동이 필요한 경우를 위해 Actor의 공통 `Update()` 안에서 가상 함수 `OnUpdate()`를 호출하도록 확장했다.
+
+```text
+World::Update
+→ Actor::Update
+   ├─ Actor별 OnUpdate
+   └─ Component 목록 Update
+```
+
+부모 Actor가 전체 실행 순서를 유지하고 자식은 `OnUpdate()`만 재정의한다. 이렇게 하면 자식이 Component 업데이트를 빼먹는 실수를 줄일 수 있다. 공통 알고리즘의 골격은 부모가 가지고 일부 단계만 자식이 바꾸는 Template Method 방식이다.
+
+### 3. 손전등 안에서 멈추는 MonsterActor
+
+몬스터는 플레이어를 직접 추적하지만 손전등의 범위에 들어오면 움직임을 멈춘다. 손전등 판정은 거리 하나만 비교하는 것이 아니라 다음 세 조건을 모두 사용한다.
+
+```text
+1. 몬스터가 손전등 원뿔 안에 있는가?
+2. 손전등 최대 거리 안에 있는가?
+3. 카메라와 몬스터 사이를 벽이 가리고 있지 않은가?
+```
+
+카메라 Forward와 `Camera → Monster` 단위 방향의 내적은 두 방향 사이 각도의 cos 값을 반환한다.
+
+```cpp
+dot = dot(CameraForward, CameraToMonsterDirection);
+```
+
+반각이 30도인 손전등이라면 다음 조건으로 원뿔 내부를 판정한다.
+
+```cpp
+dot >= cos(XMConvertToRadians(30.0f))
+```
+
+두 방향이 같으면 `dot`은 1이고, 각도가 커질수록 값이 작아진다. 각도를 매번 `acos()`로 복원할 필요 없이 cos 기준값과 직접 비교할 수 있다.
+
+몬스터 Actor의 원점이 발밑이나 모델의 중심과 다를 수 있으므로 `LightCheckOffset`을 더한 한 지점을 손전등 판정의 기준으로 사용한다.
+
+```text
+MonsterLightPoint = MonsterPosition + LightCheckOffset
+```
+
+원뿔 방향, 거리, 차폐 Ray가 모두 같은 `MonsterLightPoint`를 사용해야 서로 다른 지점을 검사해서 판정이 어긋나는 문제를 피할 수 있다.
+
+### 4. 벽 차폐 Raycast
+
+몬스터가 손전등 원뿔 안에 있더라도 벽 뒤에 있다면 빛이 직접 닿지 않는다. 그래서 카메라에서 몬스터의 판정점까지 Ray를 쏜다.
+
+```text
+Ray Origin    = CameraPosition
+Ray Direction = normalize(MonsterLightPoint - CameraPosition)
+MaxDistance   = distance(CameraPosition, MonsterLightPoint)
+```
+
+이 거리보다 앞에서 벽을 맞히면 몬스터는 가려진 상태다. `MaxDistance`를 사용하지 않고 무한히 Ray를 보내면 몬스터 뒤쪽의 벽까지 맞혀 잘못 가려졌다고 판단할 수 있다.
+
+### 5. Mesh가 CPU 정점과 인덱스를 유지해야 하는 이유
+
+기존 Mesh는 정점/인덱스를 GPU 버퍼로 만든 뒤 CPU 데이터가 필요 없다고 보고 버렸다. 하지만 MeshCollider가 삼각형 충돌을 계산하려면 CPU에서도 원본 정점과 인덱스를 읽을 수 있어야 한다.
+
+```cpp
+const std::vector<Vertex>& GetVertices() const;
+const std::vector<UINT>& GetIndices() const;
+```
+
+GPU VertexBuffer와 IndexBuffer는 렌더링용이고, CPU vector는 충돌과 Navigation 생성에 사용된다.
+
+```text
+같은 Model
+├─ GPU Buffer: 화면에 그리기
+└─ CPU Vertices/Indices: Raycast, 바닥 검사, Navigation Bake
+```
+
+### 6. Ray와 Triangle 충돌
+
+MeshCollider는 Mesh의 인덱스를 세 개씩 읽어 삼각형을 만든다.
+
+```text
+Indices[i + 0] → A
+Indices[i + 1] → B
+Indices[i + 2] → C
+```
+
+정점은 Model Local 좌표이므로 Actor의 WorldMatrix를 적용해서 월드 좌표로 바꾼 뒤 Ray와 검사한다.
+
+```text
+Model Local Vertex
+× Actor WorldMatrix
+→ World Triangle Vertex
+```
+
+Ray-Triangle 판정은 먼저 삼각형 평면과 Ray가 만나는 거리 `t`를 구한다.
+
+```text
+HitPosition = RayOrigin + RayDirection × t
+```
+
+평면과 만났다고 해서 반드시 삼각형 내부에 있는 것은 아니다. 교점이 각 변의 같은 안쪽 방향에 있는지 다음 세 외적과 내적으로 검사한다.
+
+```text
+dot(AB × AP, Normal)
+dot(BC × BP, Normal)
+dot(CA × CP, Normal)
+```
+
+정점 순서가 일관되어 있다면 내부 점은 세 값의 부호가 같다. 작은 음수 Epsilon을 허용하는 이유는 부동소수점 오차 때문에 변 위의 점이 아주 작은 음수로 계산될 수 있기 때문이다.
+
+### 7. MeshColliderComponent의 역할
+
+`MeshColliderComponent`는 충돌용 Model을 소유하지 않고 가리킨다. Model의 실제 수명은 `LightSaverGame`이 관리한다.
+
+MeshCollider의 Raycast 과정은 다음과 같다.
+
+```text
+Model의 모든 Mesh 순회
+→ 각 Mesh의 Index를 3개씩 순회
+→ 세 정점을 World 좌표로 변환
+→ RaycastTriangle 실행
+→ 현재까지 가장 가까운 충돌만 유지
+```
+
+`World::Raycast()`는 Actor의 `BoxColliderComponent`와 `MeshColliderComponent`를 모두 검사하고 가장 가까운 결과를 반환한다. Box는 벽처럼 단순한 부피 충돌에 적합하고, Mesh는 굴곡 바닥처럼 실제 표면 높이가 중요한 충돌에 적합하다.
+
+### 8. 테스트 굴곡 지형
+
+`TestTerrain.obj`는 11×11 정점 Grid로 구성되며 200개의 삼각형을 가진다. 낮은 평지, 경사, 높은 평지가 이어져 플레이어와 몬스터의 지형 추적을 시험할 수 있다.
+
+```text
+낮은 평지 ──── / 경사 / ──── 높은 평지
+```
+
+FloorActor는 이 Model을 렌더링하는 MeshComponent와 충돌에 사용하는 MeshColliderComponent를 함께 가진다.
+
+```text
+FloorActor
+├─ MeshComponent(&FloorModel)
+└─ MeshColliderComponent(&FloorModel)
+```
+
+이전의 넓은 Floor BoxCollider를 제거한 이유는 화면의 Mesh 경계 밖에서도 Box Ray가 계속 맞아 플레이어가 공중에서 바닥에 붙어 있는 문제가 생겼기 때문이다. 이제 보이는 삼각형이 없는 곳에서는 Ground Ray가 실패하고 중력이 정상적으로 적용된다.
+
+### 9. World::FindFloor 공통화
+
+플레이어와 몬스터가 각자 아래 방향 Ray를 만드는 중복을 줄이기 위해 `World::FindFloor()`를 만들었다.
+
+```text
+입력 위치
+→ RayStart만큼 위에서 시작
+→ RayStart + RayEnd 거리만큼 아래 검사
+→ 가장 가까운 표면 탐색
+→ Normal.y 기준으로 걸을 수 있는 바닥인지 확인
+```
+
+현재 구현은 `Normal.y >= 0.85`인 표면만 바닥으로 인정한다. Normal이 월드 Up `(0,1,0)`에 가까울수록 `Normal.y`가 1에 가까워지고, 수직 벽에 가까울수록 0에 가까워진다.
+
+PlayerController는 하강 중에만 FindFloor를 호출한다.
+
+```cpp
+if (VerticalVelocity <= 0.0f)
+```
+
+상승 중에도 바닥을 검사하면 점프 직후 기존 바닥을 다시 발견해 속도를 0으로 만들고 플레이어를 바닥으로 Snap할 수 있기 때문이다.
+
+### 10. 몬스터가 굴곡 지형을 따라가는 방법
+
+몬스터는 먼저 목표를 향한 XZ 후보 위치를 만든다. 그 후보 위치의 위쪽에서 아래로 FindFloor를 실행해 실제 지형 Y를 찾는다.
+
+```text
+현재 위치
+→ 플레이어 방향으로 XZ 후보 이동
+→ 후보 XZ의 바닥 탐색
+→ CandidateY = GroundHitY + GroundOffset
+```
+
+`GroundOffset`은 모델 원점과 실제 발밑의 차이를 보정한다. 거미 모델은 원점이 발바닥과 정확히 일치하지 않으므로 단순히 GroundHit의 Y를 넣으면 지형 안으로 들어갈 수 있다.
+
+### 11. 경사면에 맞춘 몬스터 회전
+
+몬스터의 머리는 플레이어를 향해야 하고 몸의 Up 방향은 지형 Normal에 맞아야 한다. 먼저 플레이어 방향 `D`에서 지형 Normal `N` 방향 성분을 제거한다.
+
+```text
+ProjectedForward = D - N × dot(D, N)
+```
+
+이는 플레이어 방향을 지형의 접평면 위로 투영하는 계산이다. 이후 기저 벡터를 만든다.
+
+```text
+Forward = normalize(ProjectedForward)
+Right   = normalize(cross(Normal, Forward))
+Up      = normalize(cross(Forward, Right))
+```
+
+Right, Up, Forward를 행으로 배치하면 지형에 정렬된 회전 행렬을 만들 수 있다. 모델 파일에서 실제 머리 방향이 엔진의 기본 Forward `+Z`와 다르므로 `ModelYawOffset`으로 축을 보정한다.
+
+즉 다음 두 회전은 서로 다른 문제를 해결한다.
+
+```text
+SurfaceRotation  = 지형과 플레이어 방향에 맞추는 회전
+ModelYawOffset   = 모델 제작 축과 엔진 Forward 축의 차이 보정
+```
+
+### 12. Quaternion과 Slerp
+
+지형 Normal까지 포함한 3차원 회전을 Euler 각으로 다시 분해하면 축 순서와 불연속 문제를 다루기 어려워진다. 그래서 최종 회전 행렬을 Quaternion으로 변환해 Transform에 저장한다.
+
+```cpp
+TargetRotation = XMQuaternionRotationMatrix(TargetRotationMatrix);
+```
+
+현재 회전에서 목표 회전으로 즉시 바꾸면 지형 경계에서 몸이 튀듯이 회전한다. `XMQuaternionSlerp()`는 두 회전 사이를 구면 선형 보간한다.
+
+```cpp
+SmoothedRotation = XMQuaternionSlerp(
+    CurrentRotation,
+    TargetRotation,
+    RotationAlpha);
+```
+
+Transform은 기존 Euler 회전과 Quaternion 회전을 모두 지원한다. 단순 Actor는 기존 `Rotation`을 사용할 수 있고, 몬스터처럼 자유로운 표면 정렬이 필요한 Actor는 Quaternion을 사용한다.
+
+### 13. NavigationGrid를 만드는 이유
+
+MeshCollider는 한 지점의 정확한 바닥 높이를 알아내는 데 적합하지만, 벽을 돌아 목적지까지 가는 전체 경로를 직접 알려주지는 않는다. NavigationGrid는 복잡한 월드를 일정한 크기의 셀로 단순화한다.
+
+```text
+실제 지형과 벽          NavigationGrid
+복잡한 Mesh      →      O O O X O
+Box 장애물              O O O X O
+                        O O O O O
+```
+
+각 셀은 실제 바닥 월드 위치, Normal, 이동 가능 여부를 저장한다.
+
+```cpp
+struct NavigationCell
+{
+    XMFLOAT3 Position;
+    XMFLOAT3 Normal;
+    bool bWalkable;
+};
+```
+
+### 14. Grid Bounds와 셀 중심 좌표
+
+`MinBounds`와 `MaxBounds`는 Grid가 차지하는 월드 좌표 범위다. CellSize가 0.5라면 X와 Z를 0.5 단위로 나눈다.
+
+각 셀의 중심은 다음처럼 계산한다.
+
+```text
+CellX = MinBounds.x + (Column + 0.5) × CellSize
+CellZ = MinBounds.z + (Row    + 0.5) × CellSize
+```
+
+`0.5`를 더하는 이유는 셀 모서리가 아니라 가운데에서 바닥을 조사하기 위해서다. Column은 X축, Row는 Z축을 나타낸다. 2차원 좌표를 vector의 1차원 인덱스로 바꾸는 공식은 다음과 같다.
+
+```text
+Index = Row × ColumnCount + Column
+```
+
+### 15. Navigation Cell Bake
+
+`NavigationGrid::Build()`은 모든 셀을 순회하며 `MaxBounds.y`에서 아래로 FindFloor를 실행한다.
+
+```text
+바닥 없음 또는 너무 가파름
+→ bWalkable = false
+
+바닥 발견
+→ Position = GroundHit.Position
+→ Normal   = GroundHit.Normal
+```
+
+바닥이 있어도 벽과 겹치면 걸을 수 없다. 셀의 점 하나만 검사하면 몬스터보다 좁은 틈을 통과 가능하다고 잘못 판단하므로 몬스터 크기의 AABB를 사용한다.
+
+```text
+AgentCenter.y = GroundHit.Position.y + AgentHalfSize.y
+AgentBox = AABB(AgentCenter, AgentHalfSize)
+```
+
+`World::OverlapAABB()`가 이동을 막는 BoxCollider와 겹치면 해당 셀을 이동 불가능으로 표시한다. 이는 장애물을 몬스터의 반지름만큼 미리 확장한 것과 같은 효과를 낸다.
+
+### 16. 월드 좌표를 Cell 좌표로 변환
+
+몬스터와 플레이어는 월드 좌표를 사용하지만 A*는 Column/Row 정수 좌표를 사용한다.
+
+```text
+LocalX = WorldX - MinBounds.x
+LocalZ = WorldZ - MinBounds.z
+
+Column = floor(LocalX / CellSize)
+Row    = floor(LocalZ / CellSize)
+```
+
+`floor()`를 사용하는 이유는 음수 위치를 올바르게 Grid 바깥으로 판정하기 위해서다. 단순 정수 변환은 `-0.2`를 `0`으로 잘라 Grid 밖의 좌표를 첫 번째 셀로 잘못 판단할 수 있다.
+
+### 17. 앞으로 구현할 A* 경로 탐색
+
+NavigationGrid는 경로를 직접 찾는 것이 아니라 A*가 탐색할 그래프를 제공한다.
+
+```text
+NavigationCell = 그래프의 Node
+이동 가능한 이웃 셀 = Node 사이의 Edge
+벽 셀 = 연결할 수 없는 Node
+```
+
+A*는 다음 비용을 사용한다.
+
+```text
+G = 시작부터 현재까지 실제 이동 비용
+H = 현재부터 목표까지 예상 비용
+F = G + H
+```
+
+상하좌우 이동만 허용할 때 H는 Manhattan Distance를 사용할 수 있다.
+
+```text
+H = abs(CurrentColumn - GoalColumn)
+  + abs(CurrentRow - GoalRow)
+```
+
+Open List에서 F가 가장 작은 셀을 반복해서 선택하고, 목표를 찾으면 각 Node의 ParentIndex를 거꾸로 따라가 경로를 복원한다. 복원한 인덱스 목록을 각 NavigationCell의 월드 Position으로 바꾸면 몬스터가 따라갈 Waypoint 목록이 된다.
+
+### 18. 현재 단계의 주의점과 후속 정리
+
+현재 NavigationGrid는 기초 Bake와 월드 좌표 변환까지 연결된 학습 단계다. 다음 항목은 후속 단계에서 보완한다.
+
+```text
+GetCell에 Column/Row 범위 검사 추가
+ceil/floor 결과를 int로 바꿀 때 명시적 static_cast 적용
+ConvertToCell을 const 함수로 변경
+InCellSize가 0 이하이거나 Bounds가 뒤집힌 입력 방어
+FindFloor의 Normal.y 기준을 호출자 또는 설정값으로 분리
+이웃 셀의 높이 차이를 MaxStepHeight로 제한
+A* Open/Closed List와 ParentIndex 구현
+경로 디버그 시각화
+```
+
+현재 MSBuild Debug x64 빌드는 성공했다. NavigationGrid의 `ceil/floor` 결과를 int에 대입하는 네 곳에서 C4244 경고가 남아 있으며, 이는 위의 명시적 변환 정리 단계에서 해결할 예정이다.
+
+### 오늘의 핵심 요약
+
+```text
+실제 굴곡 지형의 높이는 Box가 아니라 Mesh 삼각형 Raycast로 구한다.
+MeshCollider를 위해 Mesh는 GPU 버퍼와 별도로 CPU 정점/인덱스를 유지한다.
+World::Raycast는 BoxCollider와 MeshCollider 중 가장 가까운 결과를 선택한다.
+World::FindFloor는 플레이어, 몬스터, Navigation Bake가 공유하는 바닥 질의다.
+몬스터는 후보 XZ 아래의 지형 높이를 찾아 경사를 따라 움직인다.
+지형 Normal과 플레이어 방향으로 접평면 기저를 만들고 Quaternion으로 회전한다.
+NavigationGrid는 복잡한 월드를 A*가 탐색할 수 있는 이동 가능 셀 그래프로 단순화한다.
+각 셀은 바닥 위치, Normal, 이동 가능 여부를 저장한다.
+벽은 몬스터 크기의 AABB Overlap으로 셀을 막는다.
+다음 단계는 이웃 셀 연결과 A* 경로 탐색이다.
+```

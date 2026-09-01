@@ -34,7 +34,8 @@ class Model
 public:
 	bool Initialize(ID3D11Device* Device, const std::string& FilePath);
 	void Draw(ID3D11DeviceContext* DeviceContext, ID3D11Buffer* MaterialBuffer);
-	
+	size_t GetMeshCount() const { return ModelDatas.size(); }
+	const Mesh* GetMesh(size_t Index) const;
 
 private:
 	std::unique_ptr<Mesh> ProcessMesh(ID3D11Device* Device, aiMesh* SourceMesh);

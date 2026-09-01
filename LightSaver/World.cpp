@@ -1,6 +1,7 @@
 #include "World.h"
 #include "Actor.h"
 #include "BoxColliderComponent.h"
+#include "MeshColliderComponent.h"
 void World::AddActor(std::unique_ptr<Actor> Actor)
 {
 	if (Actor == nullptr) return;
@@ -25,16 +26,29 @@ bool World::Raycast(const Ray& TestRay, float MaxDistance, RaycastHitResult& Out
 	{
 		if (Actor == nullptr) continue;
 		BoxColliderComponent* BoxCollider = Actor->FindComponent<BoxColliderComponent>();
-		if (BoxCollider == nullptr) continue;
-		if (RaycastAABB(TestRay, BoxCollider->GetWorldCollisionBox(), MaxDistance, OutHit))
+		if (BoxCollider != nullptr)
 		{
-			if (OutHit.Distance < MaxDistance)
+			if (RaycastAABB(TestRay, BoxCollider->GetWorldCollisionBox(), MaxDistance, OutHit))
+			{
+				if (OutHit.Distance < MaxDistance)
+				{
+					MaxDistance = OutHit.Distance;
+				}
+				bHit = true;
+				OutHit.HitActor = Actor.get();
+			}
+		}
+
+		MeshColliderComponent* MeshCollider = Actor->FindComponent<MeshColliderComponent>();
+		if (MeshCollider != nullptr)
+		{
+			if(MeshCollider->Raycast(TestRay, MaxDistance, OutHit))
 			{
 				MaxDistance = OutHit.Distance;
+				bHit = true;
 			}
-			bHit = true;
-			OutHit.HitActor = Actor.get();
 		}
+
 	}
 	return bHit;
 }
@@ -64,3 +78,23 @@ void World::CollectRenderObjects(std::vector<RenderObject>& OutRenderObjects) co
 	}
 }
 
+bool World::FindFloor(const DirectX::XMFLOAT3& Position, float RayStart, float RayEnd, RaycastHitResult& OutHit)
+{
+	Ray GroundRay = {};
+	GroundRay.Origin = Position;
+	GroundRay.Origin.y += RayStart;
+	GroundRay.Direction = { 0,-1,0 };
+	float MaxDistance = RayStart + RayEnd;
+
+	if (!Raycast(GroundRay, MaxDistance, OutHit))
+	{
+		return false;
+	}
+
+	if (OutHit.Normal.y < 0.85f)
+	{
+		return false;
+	}
+
+	return true;
+}

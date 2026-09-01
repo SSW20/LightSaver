@@ -1,5 +1,6 @@
 #pragma once
 #include <d3d11.h>
+#include <vector>
 
 struct Vertex
 {
@@ -14,6 +15,8 @@ public:
 	bool Initialize(ID3D11Device* Device, const Vertex* vertices, UINT vertexCount, const UINT* indicies, UINT indexCount);
 	void Bind(ID3D11DeviceContext* DeviceContext);
 	UINT GetIndexCount() const { return IndexCount; }
+	const std::vector<Vertex>& GetVertices() const { return CPUVertices; }
+	const std::vector<UINT>& GetIndices() const { return CPUIndices; }
 	~Mesh();
 
 private:
@@ -21,4 +24,6 @@ private:
 	ID3D11Buffer* IndexBuffer = nullptr;
 	UINT Stride = sizeof(Vertex);
 	UINT IndexCount = 0;
+	std::vector<Vertex> CPUVertices;
+	std::vector<UINT> CPUIndices;
 };

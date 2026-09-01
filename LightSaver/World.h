@@ -18,6 +18,7 @@ public:
 	bool Raycast(const Ray& TestRay, float MaxDistance, RaycastHitResult& OutHit);
 	bool OverlapAABB(const AABB& TestBox);
 	void CollectRenderObjects(std::vector<RenderObject>& OutRenderObjects) const;
+	bool FindFloor(const DirectX::XMFLOAT3& Position, float RayStart, float RayEnd, RaycastHitResult& OutHit);
 private:
 	std::vector<std::unique_ptr<Actor>> Actors;
 };

@@ -148,6 +148,16 @@ void Model::Draw(ID3D11DeviceContext* DeviceContext, ID3D11Buffer* MaterialBuffe
 	}
 }
 
+const Mesh* Model::GetMesh(size_t Index) const
+{
+	if (Index >= ModelDatas.size())
+	{
+		return nullptr;
+	}
+
+	return ModelDatas[Index].MeshData.get();
+}
+
 std::unique_ptr<Mesh> Model::ProcessMesh(ID3D11Device* Device, aiMesh* SourceMesh)
 {
 	std::vector<Vertex> SourceVertices;

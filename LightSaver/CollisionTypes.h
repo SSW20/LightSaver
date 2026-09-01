@@ -24,5 +24,12 @@ struct RaycastHitResult
     Actor* HitActor = nullptr;
 };
 
+struct Triangle
+{
+    DirectX::XMFLOAT3 A;
+    DirectX::XMFLOAT3 B;
+    DirectX::XMFLOAT3 C;
+};
+bool RaycastTriangle(const Ray& TestRay, const Triangle& TestTriangle, float MaxDistance, RaycastHitResult& OutHit);
 bool RaycastAABB(const Ray& TestRay, const AABB& Box,float MaxDistance, RaycastHitResult& OutHit);
 bool UpdateRayInterval(float Origin, float Direction,float SlabMin, float SlabMax, DirectX::XMFLOAT3 MinFaceNormal, DirectX::XMFLOAT3 MaxFaceNormal, float& TEnter, float& TExit, DirectX::XMFLOAT3& EnterNormal);

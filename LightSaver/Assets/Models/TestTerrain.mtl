@@ -1,0 +1,10 @@
+# LightSaver test terrain material
+newmtl TerrainSurface
+Ns 24.000000
+Ka 0.020000 0.020000 0.020000
+Kd 0.220000 0.300000 0.180000
+Ks 0.080000 0.080000 0.080000
+Ke 0.000000 0.000000 0.000000
+Ni 1.000000
+d 1.000000
+illum 2

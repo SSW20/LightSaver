@@ -1,0 +1,9 @@
+Asset: grass_hill_1_to_2
+Source pack: Modular Hilly Terrain Expansion
+Author: chimeforest
+Source: https://opengameart.org/content/modular-hilly-terrain-expansion
+License: Creative Commons Zero 1.0 (CC0)
+License URL: https://creativecommons.org/publicdomain/zero/1.0/
+
+The source page states that no credit is required. This file is retained to
+record the asset origin and license for the LightSaver project.

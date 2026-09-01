@@ -12,6 +12,8 @@
 #include "Renderer.h"
 #include "BoxColliderComponent.h"
 #include "PlayerController.h"
+#include "MonsterActor.h"
+#include "NavigationGrid.h"
 
 class Actor;
 class MeshComponent;
@@ -24,16 +26,14 @@ public:
 	virtual bool Render() override;
 
 	~LightSaverGame() override;
-
-
 private:
-	float Rotation = 0.0f;
 	PlayerController MainPlayerController;
 	PlayerActor* MainPlayer = nullptr;
 	Model SpiderModel; 
 	Model FloorModel; 
 	Model WallModel;
 	World GameWorld;
-	Actor* SpiderActor;
+	MonsterActor* SpiderActor;
 	Renderer RenderManager;
+	NavigationGrid MonsterNavGrid;
 };

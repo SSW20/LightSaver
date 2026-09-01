@@ -2,6 +2,14 @@
 
 bool Mesh::Initialize(ID3D11Device* Device, const Vertex* vertices, UINT vertexCount, const UINT* indicies, UINT indexCount)
 {
+	if (Device == nullptr || vertices == nullptr || indicies == nullptr || vertexCount == 0 || indexCount == 0)
+	{
+		return false;
+	}
+
+	CPUVertices.assign(vertices, vertices + vertexCount);
+	CPUIndices.assign(indicies, indicies + indexCount);
+
 	D3D11_BUFFER_DESC VertexBufferDesc = {};
 	D3D11_SUBRESOURCE_DATA VertexData = {};
 

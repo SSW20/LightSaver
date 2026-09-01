@@ -2,6 +2,7 @@
 
 void Actor::Update(float DeltaTime)
 {
+	OnUpdate(DeltaTime);
 	for (int i=0; i<Components.size(); ++i)
 	{
 		if (Components[i] == nullptr) continue;
@@ -17,3 +18,8 @@ void Actor::CollectRenderObjects(std::vector<RenderObject>& RenderObjects) const
 }
 
 Actor::~Actor() = default;
+
+void Actor::OnUpdate(float DeltaTime)
+{
+	
+}

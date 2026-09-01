@@ -38,6 +38,59 @@ AABB CreateAABBFromCenter(const DirectX::XMFLOAT3& Center, const DirectX::XMFLOA
 	return NewAABB;
 }
 
+bool RaycastTriangle(const Ray& TestRay, const Triangle& TestTriangle, float MaxDistance, RaycastHitResult& OutHit)
+{
+	DirectX::XMVECTOR A = DirectX::XMLoadFloat3(&TestTriangle.A);
+	DirectX::XMVECTOR B = DirectX::XMLoadFloat3(&TestTriangle.B);
+	DirectX::XMVECTOR C = DirectX::XMLoadFloat3(&TestTriangle.C);
+	DirectX::XMVECTOR RayOrigin = DirectX::XMLoadFloat3(&TestRay.Origin);
+	DirectX::XMVECTOR RayDirection = DirectX::XMLoadFloat3(&TestRay.Direction);
+
+	DirectX::XMVECTOR AB = DirectX::XMVectorSubtract(B, A);
+	DirectX::XMVECTOR AC = DirectX::XMVectorSubtract(C, A);
+
+	DirectX::XMVECTOR Normal = DirectX::XMVector3Normalize(DirectX::XMVector3Cross(AB, AC));
+	float Parallel = DirectX::XMVectorGetX(DirectX::XMVector3Dot(RayDirection, Normal));
+	if (std::abs(Parallel) < 0.00001f) return false;
+
+	DirectX::XMVECTOR ToPlaneOrigin = DirectX::XMVectorSubtract(A, RayOrigin);
+	DirectX::XMVECTOR DotOrigin = DirectX::XMVector3Dot(ToPlaneOrigin, Normal);
+	DirectX::XMVECTOR DotDirection = DirectX::XMVector3Dot(RayDirection, Normal);
+
+	float HitDistance = DirectX::XMVectorGetX(DirectX::XMVectorDivide(DotOrigin, DotDirection));
+	if (HitDistance < 0.0f ||HitDistance > MaxDistance) return false;
+
+	DirectX::XMVECTOR HitPoint = DirectX::XMVectorAdd(RayOrigin, DirectX::XMVectorScale(RayDirection, HitDistance));
+
+	DirectX::XMVECTOR AP = DirectX::XMVectorSubtract(HitPoint, A);
+	DirectX::XMVECTOR BC = DirectX::XMVectorSubtract(C, B);
+	DirectX::XMVECTOR BP = DirectX::XMVectorSubtract(HitPoint, B);
+	DirectX::XMVECTOR CA = DirectX::XMVectorSubtract(A, C);
+	DirectX::XMVECTOR CP = DirectX::XMVectorSubtract(HitPoint, C);
+
+	DirectX::XMVECTOR APDot = DirectX::XMVector3Dot(DirectX::XMVector3Cross(AB, AP), Normal);
+	DirectX::XMVECTOR BPDot = DirectX::XMVector3Dot(DirectX::XMVector3Cross(BC, BP), Normal);
+	DirectX::XMVECTOR CPDot = DirectX::XMVector3Dot(DirectX::XMVector3Cross(CA, CP), Normal);
+
+	float SideAB = DirectX::XMVectorGetX(APDot);
+	float SideBC = DirectX::XMVectorGetX(BPDot);
+	float SideCA = DirectX::XMVectorGetX(CPDot);
+
+	if (SideAB < -0.0001f || SideBC < -0.0001f || SideCA < -0.0001f) return false;
+
+	OutHit.Distance = HitDistance;
+	DirectX::XMStoreFloat3(&OutHit.Position, HitPoint);
+	if (DirectX::XMVectorGetX(DirectX::XMVector3Dot(Normal, RayDirection)) > 0)
+	{
+		Normal = DirectX::XMVectorNegate(Normal);
+	}
+	DirectX::XMStoreFloat3(&OutHit.Normal, Normal);
+
+
+	return true;
+
+}
+
 bool RaycastAABB(const Ray& TestRay, const AABB& Box, float MaxDistance, RaycastHitResult& OutHit)
 {
 	float TEnter = 0.0f;

@@ -117,26 +117,20 @@ void PlayerController::UpdateVerticalMovement(float DeltaTime, InputManager& Inp
 
 	// Y 축 검사
 	bool bGround = false;
-	Ray GroundRay = {};
-	GroundRay.Direction = { 0,-1,0 };
-	GroundRay.Origin = PlayerPosition;
-	RaycastHitResult OutHit;
+
 	const float GroundTolerance = 0.05f;
 	const float GroundCheckDistance = PlayerHalfSize.y + GroundTolerance;
+
+	RaycastHitResult GroundHit = {};
+
 	if (VerticalVelocity <= 0.0f)
 	{
-		if (GameWorld.Raycast(GroundRay, GroundCheckDistance, OutHit))
-		{
-			if (OutHit.Normal.y > 0.8f)
-			{
-				bGround = true;
-			}
-		}
+		bGround = GameWorld.FindFloor(PlayerPosition, 0.0f, GroundCheckDistance, GroundHit);
 	}
 	if (bGround)
 	{
 		VerticalVelocity = 0.0f;
-		PlayerPosition.y = OutHit.Position.y + PlayerHalfSize.y;
+		PlayerPosition.y = GroundHit.Position.y + PlayerHalfSize.y;
 	}
 	if (bGround && Input.IsKeyPressed(VK_SPACE))
 	{
