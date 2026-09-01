@@ -1,27 +1,113 @@
 #include "MonsterActor.h"
+#include "NavigationGrid.h"
 
 void MonsterActor::OnUpdate(float DeltaTime)
 {
-	if (Target == nullptr || GameWorld == nullptr) return;
+	if (Target == nullptr || GameWorld == nullptr || NavGrid == nullptr) return;
+	if (!Target->IsAlive()) return;
 
-	Transform PlayerTransform = Target->GetActorTransform();
-	DirectX::XMVECTOR TargetPos = DirectX::XMLoadFloat3(&PlayerTransform.Position);
 	DirectX::XMVECTOR ActorPos = DirectX::XMLoadFloat3(&GetActorTransform().Position);
-
-	DirectX::XMVECTOR TargetPosXZ = DirectX::XMVectorSetY(TargetPos, 0.0f);
+	DirectX::XMVECTOR TargetPos = DirectX::XMLoadFloat3(&Target->GetActorTransform().Position);
 	DirectX::XMVECTOR ActorPosXZ = DirectX::XMVectorSetY(ActorPos, 0.0f);
+	DirectX::XMVECTOR TargetPosXZ = DirectX::XMVectorSetY(TargetPos, 0.0f);
 	DirectX::XMVECTOR ToTarget = DirectX::XMVectorSubtract(TargetPosXZ, ActorPosXZ);
 	float DistanceToTarget = DirectX::XMVectorGetX(DirectX::XMVector3Length(ToTarget));
-	DirectX::XMVECTOR CandidatePos = ActorPos;
 
-	// XZ 설정
-	if (!IsInLight() && DistanceToTarget > AcceptanceRange)
+	bool bInLight = IsInLight();
+	UpdateState(bInLight, DistanceToTarget);
+
+	switch (CurrentState)
 	{
-		DirectX::XMVECTOR ToTargetDir = DirectX::XMVector3Normalize(ToTarget);
-		DirectX::XMVECTOR MoveAmount = DirectX::XMVectorScale(ToTargetDir, MovementSpeed * DeltaTime);
-		CandidatePos = DirectX::XMVectorAdd(ActorPosXZ, MoveAmount);
-		CandidatePos = DirectX::XMVectorSetY(CandidatePos, GetActorTransform().Position.y);
+	case MonsterState::Chase:
+		UpdateChase(DeltaTime);
+		break;
+	case MonsterState::Frozen:
+		UpdateFrozen();
+		break;
+	case MonsterState::Attack:
+		UpdateAttack();
+		break;
 	}
+}
+
+void MonsterActor::UpdateState(bool bInLight, float DistanceToTarget)
+{
+	if (bInLight)
+	{
+		ChangeState(MonsterState::Frozen);
+	}
+	else if (DistanceToTarget <= AttackRange && HasLineOfSightToTarget())
+	{
+		ChangeState(MonsterState::Attack);
+	}
+	else
+	{
+		ChangeState(MonsterState::Chase);
+	}
+}
+
+void MonsterActor::ChangeState(MonsterState NewState)
+{
+	if (CurrentState == NewState) return;
+
+	CurrentState = NewState;
+	if (CurrentState == MonsterState::Chase)
+	{
+		PathUpdateTimer = 0.0f;
+	}
+}
+
+void MonsterActor::UpdateChase(float DeltaTime)
+{
+
+	PathUpdateTimer -= DeltaTime;
+	if (PathUpdateTimer <= 0.0f)
+	{
+		CurrentPath.clear();
+		CurrentPathIndex = 0;
+		bool bPathFound = NavGrid->FindPath(GetActorTransform().Position, Target->GetActorTransform().Position, CurrentPath);
+
+		if (bPathFound && CurrentPath.size() > 1)
+		{
+			CurrentPathIndex = 1;
+		}
+		PathUpdateTimer = PathUpdateInterval;
+	}
+
+	if (CurrentPathIndex >= CurrentPath.size()) return;
+
+	DirectX::XMVECTOR ActorPos = DirectX::XMLoadFloat3(&GetActorTransform().Position);
+	DirectX::XMVECTOR ActorPosXZ = DirectX::XMVectorSetY(ActorPos, 0.0f);
+
+	DirectX::XMVECTOR WaypointPos, WaypointPosXZ, ToWaypoint = { 0 };
+	float DistanceToWaypoint = 0.0f;
+	while (CurrentPathIndex < CurrentPath.size())
+	{
+		WaypointPos = DirectX::XMLoadFloat3(&CurrentPath[CurrentPathIndex]);
+		WaypointPosXZ = DirectX::XMVectorSetY(WaypointPos, 0.0f);
+		ToWaypoint = DirectX::XMVectorSubtract(WaypointPosXZ, ActorPosXZ);
+		DistanceToWaypoint = DirectX::XMVectorGetX(DirectX::XMVector3Length(ToWaypoint));
+
+		if (DistanceToWaypoint < WaypointAcceptanceRadius)
+		{
+			++CurrentPathIndex;
+		}
+		else break;
+	}
+	if (CurrentPathIndex >= CurrentPath.size()) return;
+
+	DirectX::XMVECTOR CandidatePos = ActorPos;
+	// XZ 설정
+	DirectX::XMVECTOR ToWaypointDir = DirectX::XMVector3Normalize(ToWaypoint);
+	float MoveDistance = MovementSpeed * DeltaTime;
+	if (MoveDistance > DistanceToWaypoint)
+	{
+		MoveDistance = DistanceToWaypoint;
+	}
+
+	DirectX::XMVECTOR MoveAmount = DirectX::XMVectorScale(ToWaypointDir, MoveDistance);
+	CandidatePos = DirectX::XMVectorAdd(ActorPosXZ, MoveAmount);
+	CandidatePos = DirectX::XMVectorSetY(CandidatePos, GetActorTransform().Position.y);
 
 	// Y 설정 
 	DirectX::XMFLOAT3 CandidatePosition = {};
@@ -33,15 +119,11 @@ void MonsterActor::OnUpdate(float DeltaTime)
 	CandidatePosition.y = GroundHit.Position.y + GroundOffset;
 	GetActorTransform().Position = CandidatePosition;
 
-	if (IsInLight()) return;
-
-
 	// 회전 설정
 	DirectX::XMVECTOR GroundNormal = DirectX::XMLoadFloat3(&GroundHit.Normal);
 	GroundNormal = DirectX::XMVector3Normalize(GroundNormal);
 
-	DirectX::XMVECTOR CandidateWorld = DirectX::XMLoadFloat3(&CandidatePosition);
-	DirectX::XMVECTOR DesiredForward = DirectX::XMVectorSubtract(TargetPos, CandidateWorld);
+	DirectX::XMVECTOR DesiredForward = ToWaypoint;
 
 	float NormalAmount = DirectX::XMVectorGetX(DirectX::XMVector3Dot(DesiredForward, GroundNormal));
 	DesiredForward = DirectX::XMVectorSubtract(DesiredForward, DirectX::XMVectorScale(GroundNormal, NormalAmount));
@@ -84,6 +166,35 @@ void MonsterActor::OnUpdate(float DeltaTime)
 	GetActorTransform().SetRotationQuaternion(SmoothedRotation);
 }
 
+void MonsterActor::UpdateFrozen()
+{
+}
+
+void MonsterActor::UpdateAttack()
+{
+	if (Target == nullptr || !Target->IsAlive()) return;
+	Target->Kill();
+}
+
+bool MonsterActor::HasLineOfSightToTarget()
+{
+	DirectX::XMVECTOR ActorPos = DirectX::XMLoadFloat3(&GetActorTransform().Position);
+	DirectX::XMVECTOR LightOffset = DirectX::XMLoadFloat3(&LightCheckOffset);
+	DirectX::XMVECTOR RayOrigin = DirectX::XMVectorAdd(ActorPos, LightOffset);
+	DirectX::XMVECTOR TargetPos = Target->GetCamera().GetCameraPosition();
+	DirectX::XMVECTOR ToTarget = DirectX::XMVectorSubtract(TargetPos, RayOrigin);
+	float Distance = DirectX::XMVectorGetX(DirectX::XMVector3Length(ToTarget));
+	if (Distance <= 0.00001f) return true;
+
+	Ray AttackRay = {};
+	DirectX::XMVECTOR RayDirection = DirectX::XMVector3Normalize(ToTarget);
+	DirectX::XMStoreFloat3(&AttackRay.Origin, RayOrigin);
+	DirectX::XMStoreFloat3(&AttackRay.Direction, RayDirection);
+
+	RaycastHitResult OutHit = {};
+	return !GameWorld->Raycast(AttackRay, Distance, OutHit);
+}
+
 bool MonsterActor::IsInLight()
 {
 	// 거리 30 , out 30 , in 7 
@@ -115,10 +226,11 @@ bool MonsterActor::IsInLight()
 
 }
 
-void MonsterActor::Initialize(World* InWorld)
+void MonsterActor::Initialize(World* InWorld, NavigationGrid* InNav)
 {
-	if (InWorld == nullptr) return;
+	if (InWorld == nullptr || InNav == nullptr) return;
 	GameWorld = InWorld;
+	NavGrid = InNav;
 }
 
 void MonsterActor::RegisterTarget(Actor* TargetActor)

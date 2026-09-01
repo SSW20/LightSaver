@@ -8,6 +8,8 @@
 
 void PlayerController::Update(float DeltaTime, InputManager& Input, World& GameWorld)
 {
+	if (ControlledPlayer == nullptr || !ControlledPlayer->IsAlive()) return;
+
 	UpdateMovement(DeltaTime, Input, GameWorld);
 	UpdateVerticalMovement(DeltaTime, Input, GameWorld);
 	UpdateRotation(Input);

@@ -25,3 +25,9 @@ void PlayerActor::SetPlayerPosition(const DirectX::XMFLOAT3& NewPosition)
 	PlayerCamera.SetCameraPosition(CameraPosition);
 
 }
+
+void PlayerActor::Kill()
+{
+	if (!bIsAlive) return;
+	bIsAlive = false;
+}

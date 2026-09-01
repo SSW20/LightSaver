@@ -10685,3 +10685,515 @@ NavigationGrid는 복잡한 월드를 A*가 탐색할 수 있는 이동 가능 �
 벽은 몬스터 크기의 AABB Overlap으로 셀을 막는다.
 다음 단계는 이웃 셀 연결과 A* 경로 탐색이다.
 ```
+
+---
+
+# 2026-09-02: A* 경로 추적, 몬스터 상태 머신, 공격과 플레이어 사망
+
+이번 작업에서는 이전 단계에서 Bake한 `NavigationGrid`를 실제 A* 경로 탐색으로 완성하고, 몬스터가 그 경로를 따라 플레이어를 추적하도록 연결했다. 이어서 하나의 `OnUpdate()`에 섞여 있던 추적, 손전등 정지, 공격 판단을 유한 상태 머신으로 분리했다. 마지막으로 공격 가능한 거리와 차폐 여부를 확인한 뒤 플레이어를 사망시키고 입력을 차단하는 흐름까지 연결했다.
+
+## 1. 이번 작업의 최종 실행 흐름
+
+```text
+LightSaverGame::Update
+│
+├─ PlayerController::Update
+│  ├─ Player가 살아 있으면 입력 처리
+│  └─ Player가 죽었으면 즉시 반환
+│
+└─ World::Update
+   └─ MonsterActor::OnUpdate
+      ├─ Player 생존 여부 확인
+      ├─ Player까지 XZ 거리 계산
+      ├─ 손전등 범위와 차폐 검사
+      ├─ MonsterState 결정
+      │  ├─ Frozen
+      │  ├─ Attack
+      │  └─ Chase
+      └─ 상태에 해당하는 Update 실행
+```
+
+몬스터는 다음 우선순위로 상태를 결정한다.
+
+```text
+1순위: 손전등에 들어옴                → Frozen
+2순위: 공격 거리 안이고 벽이 없음     → Attack
+3순위: 그 외                          → Chase
+```
+
+`Frozen`을 `Attack`보다 먼저 판단하는 이유는 거미가 플레이어 바로 앞에 있더라도 손전등에 비치면 정지해야 하는 게임 규칙 때문이다.
+
+## 2. NavigationGrid에서 A* 경로를 찾도록 추가한 코드
+
+이전 단계의 NavigationGrid는 각 위치에 바닥이 있는지와 장애물이 있는지만 기록했다. 이번에는 각 Cell을 그래프의 Node로 사용해 실제 경로를 계산한다.
+
+### 이동 가능한 이웃 Cell
+
+`GetWalkableNeighborIndices()`는 현재 Cell의 상하좌우를 검사한다.
+
+```text
+       위
+       O
+왼쪽 O C O 오른쪽
+       O
+      아래
+```
+
+각 이웃은 다음 조건을 모두 만족해야 한다.
+
+```text
+Grid 범위 안에 있음
+bWalkable == true
+현재 Cell과 높이 차이가 MaxStepHeight 이하
+```
+
+높이 차이를 검사하지 않으면 XZ상으로 붙어 있지만 수직으로 크게 떨어진 두 바닥을 연결된 길로 잘못 처리할 수 있다.
+
+`GetCell()`에는 범위 검사를 추가했다.
+
+```cpp
+if (Column < 0 || Column >= ColumnCount ||
+    Row < 0 || Row >= RowCount)
+{
+    return nullptr;
+}
+```
+
+이 검사가 없으면 가장자리 Cell에서 이웃을 찾을 때 `Cells` 범위 밖 메모리에 접근할 수 있다.
+
+### A*가 사용하는 NavigationNode
+
+```cpp
+struct NavigationNode
+{
+    float GCost;
+    float HCost;
+    int ParentIndex;
+    bool bOpen;
+    bool bClosed;
+};
+```
+
+각 값의 의미는 다음과 같다.
+
+```text
+GCost       시작점부터 현재 Node까지 실제로 이동한 비용
+HCost       현재 Node부터 목적지까지 남았다고 예상하는 비용
+F           GCost + HCost
+ParentIndex 현재 Node로 오기 직전의 Node
+bOpen       앞으로 조사할 후보
+bClosed     조사가 끝난 Node
+```
+
+아직 발견하지 않은 Node의 `GCost`는 무한대로 초기화한다.
+
+```cpp
+float GCost = std::numeric_limits<float>::infinity();
+```
+
+그래야 처음 발견한 경로의 유한한 비용이 항상 기존 값보다 작아서 Node 정보가 갱신된다.
+
+### Open List와 가장 작은 F 선택
+
+Open List에는 앞으로 조사할 Cell 인덱스가 들어간다. 반복할 때마다 `F = G + H`가 가장 작은 Node를 꺼내 Closed 상태로 만든다.
+
+```text
+Open List에서 최소 F 선택
+→ Open List에서 제거
+→ Closed 처리
+→ 이동 가능한 이웃 조사
+→ 더 짧은 경로라면 G, H, Parent 갱신
+```
+
+상하좌우만 이동하므로 현재 H는 Manhattan Distance를 사용한다.
+
+```text
+H = abs(CurrentColumn - GoalColumn)
+  + abs(CurrentRow - GoalRow)
+```
+
+### ParentIndex로 경로 복원
+
+목표 Node에 도착한 다음 `ParentIndex`를 거꾸로 따라간다.
+
+```text
+Goal → 이전 Node → 이전 Node → Start
+```
+
+이 결과는 목표부터 시작 순서이므로 마지막에 `std::reverse()`를 실행한다.
+
+```text
+Start → Waypoint 1 → Waypoint 2 → Goal
+```
+
+최종적으로 Cell의 인덱스가 아니라 실제 월드 위치를 `OutPath`에 저장하므로 몬스터는 결과를 바로 이동 목표로 사용할 수 있다.
+
+## 3. 몬스터가 A* 경로를 따라가도록 추가한 코드
+
+`MonsterActor`는 다음 경로 정보를 보관한다.
+
+```cpp
+std::vector<XMFLOAT3> CurrentPath;
+size_t CurrentPathIndex;
+float PathUpdateTimer;
+float PathUpdateInterval;
+float WaypointAcceptanceRadius;
+```
+
+매 프레임 A*를 실행하면 플레이어가 조금 움직일 때마다 전체 Grid를 다시 탐색하므로 불필요한 CPU 비용이 커진다. 따라서 `PathUpdateInterval`마다 경로를 다시 구한다.
+
+```text
+PathUpdateTimer 감소
+→ 0 이하가 됨
+→ Player의 현재 위치로 FindPath
+→ 타이머 초기화
+```
+
+`CurrentPathIndex`는 현재 따라가는 Waypoint를 가리킨다. 거리가 `WaypointAcceptanceRadius`보다 가까워지면 다음 인덱스로 넘어간다.
+
+이동 방향과 회전 방향도 같은 `ToWaypoint`를 사용하도록 변경했다. 이전에는 이동은 Waypoint를 따르지만 회전은 항상 Player를 향해 벽을 우회할 때 옆걸음처럼 보일 수 있었다.
+
+### 삭제한 기존 회전 방향
+
+```cpp
+DesiredForward = TargetPos - CandidateWorld;
+```
+
+### 추가한 회전 방향
+
+```cpp
+DesiredForward = ToWaypoint;
+```
+
+이후 지형 Normal 방향 성분을 제거하고 Quaternion으로 보간하는 기존 경사면 회전 코드는 그대로 사용한다.
+
+## 4. 하드코딩 Y 스폰을 제거한 이유
+
+지형 크기를 바꾸자 같은 XZ 좌표가 이전과 다른 경사 구간을 가리키게 됐다. Player와 Spider의 Y를 숫자로 직접 지정하면 지형이 변경될 때마다 Actor가 공중이나 지형 안에 생성됐다.
+
+### 삭제한 코드
+
+```cpp
+MainPlayer->SetPlayerPosition({ 0.0f, 1.85f, 0.0f });
+SpiderActor->GetActorTransform().Position.y = 2.05f;
+```
+
+테스트 중 Y를 8 또는 15처럼 높이는 방식도 근본적인 해결이 아니다. 특히 Spider의 `FindFloor()` 탐색 거리는 제한되어 있으므로 너무 높은 Y에서는 바닥을 찾지 못한다.
+
+### 추가한 방식
+
+```text
+스폰할 XZ 결정
+→ Grid 위쪽 Y에서 아래로 FindFloor
+→ 충돌한 바닥 Y 획득
+→ Actor별 바닥 Offset을 더함
+```
+
+Player는 중심에서 발까지의 거리 `0.8`, Spider는 모델 원점에서 발까지의 거리 `0.4223`을 더한다.
+
+```cpp
+PlayerSpawnPosition.y = GroundHit.Position.y + 0.8f;
+SpiderSpawnPosition.y = GroundHit.Position.y + 0.4223f;
+```
+
+이 코드는 `MeshColliderComponent`를 FloorActor에 추가한 다음 실행해야 한다. 그 전에는 World에 Ray가 맞을 바닥 충돌체가 존재하지 않는다.
+
+## 5. 상태 머신을 만들기 전의 문제
+
+기존 `MonsterActor::OnUpdate()`에는 다음 책임이 한 함수에 모두 들어 있었다.
+
+```text
+경로 재계산
+Waypoint 선택
+플레이어 거리 계산
+손전등 판정
+XZ 이동
+바닥 Y 보정
+손전등 재판정
+경사면 회전
+```
+
+이 구조에서는 새로운 공격 행동을 추가할수록 `if`와 중간 `return`이 계속 늘어난다. 어떤 조건 때문에 이동이나 회전이 중단됐는지 추적하기도 어려워진다.
+
+특히 다음 두 문제가 있었다.
+
+```text
+IsInLight()를 같은 프레임에 두 번 호출
+AcceptanceRange가 정지 거리인지 공격 거리인지 의미가 불분명
+```
+
+## 6. 상태 머신을 위해 추가한 코드
+
+### MonsterState
+
+```cpp
+enum class MonsterState
+{
+    Chase,
+    Frozen,
+    Attack
+};
+```
+
+`enum class`는 몬스터가 동시에 하나의 명확한 상태만 갖도록 표현한다. `bool bChasing`, `bool bFrozen`, `bool bAttacking`처럼 여러 bool을 사용하면 둘 이상의 값이 동시에 true가 되는 잘못된 조합을 막기 어렵다.
+
+```cpp
+MonsterState CurrentState = MonsterState::Chase;
+```
+
+상태는 몬스터의 행동 정보이므로 World나 Game이 아니라 `MonsterActor`가 소유한다.
+
+### OnUpdate의 역할 축소
+
+변경 후 `OnUpdate()`는 감지, 판단, 분기만 담당한다.
+
+```cpp
+bool bInLight = IsInLight();
+UpdateState(bInLight, DistanceToTarget);
+
+switch (CurrentState)
+{
+case MonsterState::Chase:
+    UpdateChase(DeltaTime);
+    break;
+case MonsterState::Frozen:
+    UpdateFrozen();
+    break;
+case MonsterState::Attack:
+    UpdateAttack();
+    break;
+}
+```
+
+기존 A* 이동과 지형 회전 코드는 삭제하지 않고 `UpdateChase()`로 옮겼다. 즉 계산 방식을 새로 작성한 것이 아니라 책임에 맞는 함수로 위치를 변경한 것이다.
+
+### UpdateState
+
+```text
+bInLight == true
+→ Frozen
+
+bInLight == false이고 공격 가능
+→ Attack
+
+그 외
+→ Chase
+```
+
+상태 판단을 한 함수에 모으면 공격 조건이나 새로운 상태가 추가되어도 `OnUpdate()` 전체를 뒤질 필요가 없다.
+
+### ChangeState
+
+```cpp
+if (CurrentState == NewState) return;
+CurrentState = NewState;
+```
+
+같은 상태를 매 프레임 다시 진입하는 것을 막는다. `Frozen`이나 `Attack`에서 `Chase`로 돌아올 때는 다음 코드를 실행한다.
+
+```cpp
+PathUpdateTimer = 0.0f;
+```
+
+그러면 빛에서 벗어난 직후 오래된 경로를 기다리지 않고 Player의 현재 위치로 즉시 A*를 다시 실행한다.
+
+### UpdateFrozen이 비어 있는 이유
+
+```cpp
+void MonsterActor::UpdateFrozen()
+{
+}
+```
+
+이는 빠진 코드가 아니다. Frozen 상태의 규칙이 이동, 회전, 공격을 모두 하지 않는 것이므로 빈 함수 자체가 의도한 행동이다. 상태가 명시적으로 존재하기 때문에 이후 정지 효과음이나 재질 변화도 이 위치에 추가할 수 있다.
+
+## 7. 상태 머신을 만들며 삭제하거나 대체한 코드
+
+### 중복 손전등 판정 삭제
+
+기존에는 이동 조건과 이동 후 회전 조건에서 `IsInLight()`를 각각 호출했다.
+
+```cpp
+if (!IsInLight() && DistanceToTarget > AcceptanceRange)
+{
+    // 이동
+}
+
+if (IsInLight()) return;
+```
+
+변경 후에는 한 프레임에 한 번만 계산한다.
+
+```cpp
+bool bInLight = IsInLight();
+```
+
+그 결과를 `UpdateState()`에 전달하므로 같은 프레임의 판단 기준이 일관되고 Raycast도 한 번 줄어든다.
+
+### AcceptanceRange 삭제
+
+```cpp
+float AcceptanceRange = 3.0f;
+```
+
+를 제거하고 목적이 명확한 다음 값으로 교체했다.
+
+```cpp
+float AttackRange = 1.2f;
+```
+
+`WaypointAcceptanceRadius`는 경로 지점 도착 거리이고 `AttackRange`는 Player를 공격할 수 있는 거리다. 두 값은 비슷해 보여도 서로 다른 시스템의 기준이다.
+
+### UpdateChase 내부의 상태 조건 삭제
+
+기존 이동 코드 안의 다음 조건도 제거했다.
+
+```cpp
+if (!IsInLight() && DistanceToTarget > AcceptanceRange)
+```
+
+`UpdateChase()`는 이미 Chase 상태일 때만 호출되므로 함수 내부에서 다시 Frozen과 Attack 조건을 확인할 필요가 없다. 각 상태 함수가 자기 행동만 담당하도록 만든 것이다.
+
+## 8. 플레이어 사망 상태를 추가한 설계
+
+현재 게임은 몬스터에게 붙잡히면 즉사하는 공포게임이므로 우선 체력 수치 대신 생존 여부만 저장한다.
+
+```cpp
+bool bIsAlive = true;
+```
+
+PlayerActor에 다음 인터페이스를 추가했다.
+
+```cpp
+void Kill();
+bool IsAlive() const;
+```
+
+`Kill()`은 여러 번 호출돼도 최초 한 번만 상태를 변경한다.
+
+```cpp
+void PlayerActor::Kill()
+{
+    if (!bIsAlive) return;
+    bIsAlive = false;
+}
+```
+
+생존 상태를 PlayerController가 아니라 PlayerActor에 둔 이유는 살아 있는지 죽었는지가 입력 장치의 상태가 아니라 게임 속 Player 자신의 상태이기 때문이다.
+
+## 9. 사망 후 입력을 중단하도록 추가한 코드
+
+`PlayerController::Update()` 입구에 다음 Guard Clause를 추가했다.
+
+```cpp
+if (ControlledPlayer == nullptr ||
+    !ControlledPlayer->IsAlive())
+{
+    return;
+}
+```
+
+이 한 곳에서 반환하면 이후 호출되는 이동, 중력과 점프, 카메라 회전, E 상호작용이 모두 실행되지 않는다. 각 입력 함수마다 `IsAlive()`를 반복해서 검사하지 않아도 된다.
+
+렌더링과 게임 루프는 종료하지 않는다. 따라서 죽은 순간의 화면은 계속 표시되고, 이후 그 위에 사망 UI와 재시작 처리를 추가할 수 있다.
+
+## 10. 몬스터 공격을 위해 추가한 코드
+
+`UpdateAttack()`은 Player가 살아 있을 때 `Kill()`을 호출한다.
+
+```cpp
+void MonsterActor::UpdateAttack()
+{
+    if (Target == nullptr || !Target->IsAlive()) return;
+    Target->Kill();
+}
+```
+
+다음 프레임부터 MonsterActor도 죽은 Player를 계속 추적하지 않는다.
+
+```cpp
+if (!Target->IsAlive()) return;
+```
+
+따라서 공격 이후 Player와 Monster가 모두 현재 위치에서 멈춘다.
+
+## 11. 거리만으로 공격하면 생기는 벽 관통 문제
+
+단순히 다음 조건만 사용하면 벽 바로 반대편에 있는 Player도 공격할 수 있다.
+
+```cpp
+DistanceToTarget <= AttackRange
+```
+
+이를 막기 위해 `HasLineOfSightToTarget()`을 추가했다.
+
+```text
+Monster의 몸 중심에서 Player Camera 방향 계산
+→ 정규화한 방향으로 Ray 생성
+→ Player까지의 거리만큼 World::Raycast
+→ 중간 Collider에 맞으면 시야 차단
+→ 아무것도 맞지 않으면 공격 가능
+```
+
+최종 Attack 조건은 다음과 같다.
+
+```cpp
+DistanceToTarget <= AttackRange &&
+HasLineOfSightToTarget()
+```
+
+Player와 Monster 자신에게 충돌체가 없으므로 목적지까지 아무것도 맞지 않는 것이 시야가 열린 상태다. 벽 BoxCollider가 중간에 있으면 Raycast가 true를 반환하므로 공격하지 않는다.
+
+## 12. 파일별 변경 책임
+
+```text
+NavigationGrid.h/.cpp
+    이웃 Cell, NavigationNode, A* 탐색, 경로 복원
+
+LightSaverGame.cpp
+    넓어진 테스트 맵과 중앙 벽
+    Player와 Spider의 Ray 기반 지면 스폰
+    NavigationGrid를 MonsterActor에 전달
+
+MonsterActor.h/.cpp
+    A* 경로 보관과 Waypoint 추적
+    MonsterState 상태 머신
+    손전등 정지
+    공격 거리와 공격 차폐 Ray
+    Player Kill 호출
+
+PlayerActor.h/.cpp
+    bIsAlive 소유
+    Kill과 IsAlive 제공
+
+PlayerController.cpp
+    사망한 Player의 모든 입력 차단
+```
+
+## 13. 현재 완료 범위와 남은 작업
+
+현재 연결된 게임 흐름은 다음과 같다.
+
+```text
+멀리 있고 빛을 받지 않음
+→ A* 경로를 따라 추적
+
+손전등에 들어옴
+→ Frozen 상태로 즉시 정지
+
+빛에서 벗어남
+→ 경로를 즉시 다시 계산하고 추적
+
+1.2m 안이지만 벽이 있음
+→ 공격하지 않음
+
+1.2m 안이고 벽이 없음
+→ Attack
+→ Player Kill
+→ Player 입력 중단
+→ Monster 추적 중단
+```
+
+아직 공격 애니메이션, 사망 화면, 재시작, 발전기 상호작용은 구현하지 않았다. 논리 구조상 `추적 → 손전등 정지 → 공격 → 사망`까지 연결된 상태다.
+
+Debug x64 MSBuild로 전체 빌드가 성공했다.
