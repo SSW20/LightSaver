@@ -14,9 +14,12 @@
 #include "PlayerController.h"
 #include "MonsterActor.h"
 #include "NavigationGrid.h"
+#include "GameHUD.h"
+#include "GameState.h"
 
 class Actor;
 class MeshComponent;
+class GeneratorActor;
 
 class LightSaverGame : public GameLoop
 {
@@ -32,8 +35,12 @@ private:
 	Model SpiderModel; 
 	Model FloorModel; 
 	Model WallModel;
+	Model GeneratorModel;
 	World GameWorld;
-	MonsterActor* SpiderActor;
+	MonsterActor* SpiderActor = nullptr;
+	GeneratorActor* LightGenerator = nullptr;
+	GameState CurrentGameState = GameState::Playing;
 	Renderer RenderManager;
 	NavigationGrid MonsterNavGrid;
+	GameHUD HUD;
 };

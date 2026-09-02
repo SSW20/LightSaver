@@ -140,9 +140,12 @@
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="CollisionTypes.cpp" />
     <ClCompile Include="Component.cpp" />
+    <ClCompile Include="GameHUD.cpp" />
     <ClCompile Include="GameLoop.cpp" />
+    <ClCompile Include="GeneratorActor.cpp" />
     <ClCompile Include="Graphics.cpp" />
     <ClCompile Include="InputManager.cpp" />
+    <ClCompile Include="Interactable.cpp" />
     <ClCompile Include="LightSaverGame.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="Mesh.cpp" />
@@ -159,11 +162,15 @@
     <ClCompile Include="Texture.cpp" />
     <ClCompile Include="Timer.cpp" />
     <ClCompile Include="Transform.cpp" />
+    <ClCompile Include="UIRenderer.cpp" />
     <ClCompile Include="Windows.cpp" />
     <ClCompile Include="World.cpp" />
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="shader.hlsl">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+    </FxCompile>
+    <FxCompile Include="UIShader.hlsl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
     </FxCompile>
   </ItemGroup>
@@ -173,9 +180,13 @@
     <ClInclude Include="Camera.h" />
     <ClInclude Include="CollisionTypes.h" />
     <ClInclude Include="Component.h" />
+    <ClInclude Include="GameHUD.h" />
+    <ClInclude Include="GameState.h" />
     <ClInclude Include="GameLoop.h" />
+    <ClInclude Include="GeneratorActor.h" />
     <ClInclude Include="Graphics.h" />
     <ClInclude Include="InputManager.h" />
+    <ClInclude Include="Interactable.h" />
     <ClInclude Include="LightSaverGame.h" />
     <ClInclude Include="Mesh.h" />
     <ClInclude Include="MeshColliderComponent.h" />
@@ -192,6 +203,7 @@
     <ClInclude Include="Texture.h" />
     <ClInclude Include="Timer.h" />
     <ClInclude Include="Transform.h" />
+    <ClInclude Include="UIRenderer.h" />
     <ClInclude Include="Windows.h" />
     <ClInclude Include="World.h" />
   </ItemGroup>

@@ -173,7 +173,7 @@ void MonsterActor::UpdateFrozen()
 void MonsterActor::UpdateAttack()
 {
 	if (Target == nullptr || !Target->IsAlive()) return;
-	Target->Kill();
+	Target->TakeDamage(1);
 }
 
 bool MonsterActor::HasLineOfSightToTarget()

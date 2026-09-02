@@ -13,8 +13,19 @@ public:
 	void Kill();
 	bool IsAlive() const { return bIsAlive; }
 
+	void TakeDamage(int Damage);
+	float GetDamageAlpha() const { return 1.0f - float(CurrentHealth) / float(MaxHealth); }
+	int GetCurrentHealth() const { return CurrentHealth; }
+
+protected:
+	void OnUpdate(float DeltaTime) override;
 private:
 	Camera PlayerCamera;
 	DirectX::XMFLOAT3 CameraOffset = { 0.0f, 0.65f, 0.0f };
 	bool bIsAlive = true;
+	int MaxHealth = 3;
+	int CurrentHealth = 3;
+
+	float InvincibleDuration = 1.0f;
+	float InvincibleTimer = 0.0f;
 };

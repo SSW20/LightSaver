@@ -20,7 +20,7 @@ public:
 
 	Windows() {};
 
-	bool Initialize(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
+	bool Initialize(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow, float Width, float Height)
 	{
 		WCHAR WindowClass[] = L"LightSaver";
 		WCHAR WindowTitle[] = L"LightSaver";
@@ -36,7 +36,7 @@ public:
 			WindowClass,
 			WindowTitle,
 			WS_OVERLAPPEDWINDOW,
-			0, 0, 1280, 720,
+			0, 0, Width, Height,
 			NULL,
 			NULL,
 			hInstance,

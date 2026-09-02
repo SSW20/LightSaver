@@ -7,12 +7,14 @@
 #include <cmath>
 #include <vector>
 #include "MeshColliderComponent.h"
+#include "GeneratorActor.h"
 
 bool LightSaverGame::OnInitialize()
 {
 	if (!SpiderModel.Initialize(GetGraphics().Device, "Assets/Models/Spider/spider.obj")) return false;
 	if (!WallModel.Initialize(GetGraphics().Device, "Assets/Models/Room/Wall.obj")) return false;
 	if (!FloorModel.Initialize(GetGraphics().Device, "Assets/Models/TestTerrain.obj")) return false;
+	if (!GeneratorModel.Initialize(GetGraphics().Device, "Assets/Models/GeneratorBox.obj")) return false;
 
 	MainPlayer = GameWorld.SpawnActor<PlayerActor>();
 	MainPlayerController.Possess(MainPlayer);
@@ -21,6 +23,17 @@ bool LightSaverGame::OnInitialize()
 	SpiderActor->GetActorTransform().Scale = { 0.01f, 0.01f, 0.01f };
 	SpiderActor->AddComponent<MeshComponent>(&SpiderModel);
 	SpiderActor->RegisterTarget(MainPlayer);
+
+	LightGenerator = GameWorld.SpawnActor<GeneratorActor>();
+	LightGenerator->GetActorTransform().Scale = { 5.0f, 5.0f, 5.0f };
+	LightGenerator->GetActorTransform().Position = { 5.0f, 5.0f, 5.0f };
+	LightGenerator->AddComponent<MeshComponent>(&GeneratorModel);
+	LightGenerator->AddComponent<MeshColliderComponent>(&GeneratorModel);
+	BoxColliderComponent* LightGeneratorCollider = LightGenerator->AddComponent<BoxColliderComponent>();
+	AABB LightGeneratorCollision;
+	LightGeneratorCollision.Min = { -0.5f, -0.5f, -0.1f };
+	LightGeneratorCollision.Max = { 0.5f,  0.5f,  0.1f };
+	LightGeneratorCollider->SetCollisionBox(LightGeneratorCollision);
 
 	Actor* WallActor;
 	Actor* FloorActor;
@@ -59,8 +72,9 @@ bool LightSaverGame::OnInitialize()
 	if (!MonsterNavGrid.Build(GameWorld, GridMin, GridMax, 0.5f, MonsterHalfSize)) return false;
 	SpiderActor->Initialize(&GameWorld, &MonsterNavGrid);
 
-
 	RenderManager.Initialize(GetGraphics());
+	HUD.Initialize(GetGraphics());
+	
 	ShowCursor(FALSE);
 
 	return true;
@@ -68,8 +82,24 @@ bool LightSaverGame::OnInitialize()
 
 void LightSaverGame::Update(float deltaTime)
 {
+	if (CurrentGameState != GameState::Playing)
+	{
+		return;
+	}
+
 	MainPlayerController.Update(deltaTime, GetInput(), GameWorld);
 	GameWorld.Update(deltaTime);
+
+	if (MainPlayer != nullptr && !MainPlayer->IsAlive())
+	{
+		CurrentGameState = GameState::PlayerDead;
+		return;
+	}
+
+	if (LightGenerator != nullptr && LightGenerator->IsRepaired())
+	{
+		CurrentGameState = GameState::GameClear;
+	}
 }
 
 bool LightSaverGame::Render()
@@ -79,7 +109,12 @@ bool LightSaverGame::Render()
 		return false;
 	}
 
-	return RenderManager.Render(GameWorld, MainPlayer->GetCamera());
+	if (!RenderManager.Render(GameWorld, MainPlayer->GetCamera()))
+	{
+		return false;
+	}
+
+	return HUD.Render(CurrentGameState, MainPlayer->GetDamageAlpha(), MainPlayerController.IsFindGenerator(), MainPlayerController.IsInteracting(), LightGenerator->GetRepairProgress());
 }
 
 

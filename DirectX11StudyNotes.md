@@ -11197,3 +11197,496 @@ PlayerController.cpp
 아직 공격 애니메이션, 사망 화면, 재시작, 발전기 상호작용은 구현하지 않았다. 논리 구조상 `추적 → 손전등 정지 → 공격 → 사망`까지 연결된 상태다.
 
 Debug x64 MSBuild로 전체 빌드가 성공했다.
+
+---
+
+# 2026-09-03 - UI 렌더러, 피격 화면, 발전기 상호작용과 진행 바
+
+## 1. 이번 단계에서 완성한 게임 흐름
+
+이번 단계에서는 기존의 3D 장면 위에 2D UI를 그리는 기능을 만들고, Player의 피해 상태와 발전기 수리 상태를 화면으로 전달했다.
+
+```text
+MonsterActor
+    → PlayerActor::TakeDamage(1)
+    → 체력과 무적 시간 변경
+    → GetDamageAlpha()
+    → GameHUD
+    → 화면 가장자리 피격 이미지
+
+PlayerController
+    → 카메라 중심에서 Raycast
+    → Interactable 탐색
+    → E 입력 중 Interact(DeltaTime)
+    → GeneratorActor의 수리 시간 증가
+    → GetRepairProgress()
+    → GameHUD
+    → 발전기 진행 바
+```
+
+게임 로직이 직접 Direct3D 11 명령을 호출하지 않고, `GameHUD`가 필요한 값만 받아서 UI를 결정한다. 실제 정점 생성과 Draw 호출은 `UIRenderer`가 담당한다.
+
+## 2. GameState와 GameHUD의 역할
+
+게임의 전체 상태는 다음 세 값으로 구분한다.
+
+```cpp
+enum class GameState
+{
+    Playing,
+    PlayerDead,
+    GameClear
+};
+```
+
+여러 개의 bool로 상태를 표현하면 `bPlaying == true`이면서 `bPlayerDead == true`인 모순된 조합이 생길 수 있다. `enum class`는 한 시점에 하나의 상태만 선택하게 한다.
+
+`GameHUD`는 상태에 따라 무엇을 그릴지 결정한다.
+
+```text
+Playing
+    조준점
+    피격 테두리
+    상호작용 E 아이콘
+    발전기 수리 진행 바
+
+PlayerDead
+    피격 테두리
+    YOU DIED 이미지
+
+GameClear
+    임시 클리어 화면
+```
+
+`GameHUD`는 UI의 의미를 알고 있지만 GPU 버퍼 사용법은 알 필요가 없다. 반대로 `UIRenderer`는 사각형을 그릴 수 있지만 그 사각형이 조준점인지 체력 표시인지 알지 못한다.
+
+## 3. UI가 3D 장면 위에 그려지는 순서
+
+한 프레임의 렌더링 순서는 다음과 같다.
+
+```text
+Renderer::Render
+    → 3D 바닥, 벽, 발전기, 몬스터 출력
+
+GameHUD::Render
+    → UIRenderer::BeginFrame
+    → UI 사각형과 이미지 등록
+    → UIRenderer::EndFrame
+    → UI Draw
+
+Present
+    → 완성된 Back Buffer를 화면에 표시
+```
+
+UI를 3D 장면보다 나중에 그리므로 UI 픽셀이 장면 위에 놓인다. UI 단계에서는 깊이 검사를 비활성화한다.
+
+```cpp
+DepthDesc.DepthEnable = false;
+DepthDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+DepthDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+```
+
+3D 깊이 버퍼 값을 검사하지 않으므로 조준점이나 메뉴가 벽 뒤로 사라지지 않는다. UI를 그린 뒤에는 기존 DepthStencilState를 복원해야 다음 렌더링 코드가 UI 설정의 영향을 받지 않는다.
+
+## 4. UIVertex와 셰이더 입력
+
+UI 정점 하나에는 다음 정보가 들어간다.
+
+```cpp
+struct UIVertex
+{
+    XMFLOAT3 Position;
+    XMFLOAT4 Color;
+    XMFLOAT2 UV;
+};
+```
+
+각 멤버의 의미는 다음과 같다.
+
+```text
+Position : 화면에서 정점이 놓일 위치
+Color    : 이미지에 곱할 색과 전체 투명도
+UV       : Texture의 어느 위치를 읽을지 나타내는 좌표
+```
+
+Input Layout은 CPU의 `UIVertex` 메모리를 Vertex Shader가 어떻게 해석할지 연결한다.
+
+```cpp
+POSITION : float 3개, Offset 0
+COLOR    : float 4개, Offset 12
+TEXCOORD : float 2개, Offset 28
+```
+
+`POSITION`이 12바이트이므로 다음 `COLOR`는 12바이트 위치에서 시작한다. `COLOR`는 16바이트이므로 `TEXCOORD`는 12 + 16인 28바이트 위치에서 시작한다.
+
+HLSL Pixel Shader는 Texture 색과 정점 색을 곱한다.
+
+```hlsl
+float4 TextureColor = UITexture.Sample(UISampler, input.uv);
+return input.color * TextureColor;
+```
+
+흰 Texture를 사용하면 입력 Color가 그대로 출력되므로 단색 사각형을 그릴 수 있다. PNG Texture를 사용하면 이미지 색에 Color를 곱해 색조와 전체 알파를 조절할 수 있다.
+
+## 5. 사각형 하나를 삼각형 두 개로 만드는 과정
+
+GPU에 사각형 Primitive는 없으므로 사각형 하나를 삼각형 두 개, 즉 정점 6개로 만든다.
+
+```text
+왼쪽 위 ───── 오른쪽 위
+   │       ／     │
+   │    ／        │
+   │ ／           │
+왼쪽 아래 ─── 오른쪽 아래
+```
+
+각 꼭짓점에는 화면 위치와 함께 다음 UV를 준다.
+
+```text
+왼쪽 위     (0, 0)
+오른쪽 위   (1, 0)
+왼쪽 아래   (0, 1)
+오른쪽 아래 (1, 1)
+```
+
+그러면 Texture의 전체 영역이 사각형에 대응한다. 같은 `AddQuad()`를 단색 사각형과 이미지 모두에 재사용하고, 단색 사각형에는 1x1 흰 Texture를 전달한다.
+
+## 6. 픽셀 좌표를 Clip Space로 변환하는 이유
+
+UI 코드는 화면 크기를 기준으로 배치하는 것이 편하다.
+
+```text
+픽셀 좌표
+왼쪽 위     (0, 0)
+오른쪽 아래 (ScreenWidth, ScreenHeight)
+```
+
+하지만 Vertex Shader가 최종적으로 출력하는 Clip 좌표는 다음 범위를 사용한다.
+
+```text
+왼쪽  -1
+오른쪽 +1
+위쪽  +1
+아래  -1
+```
+
+따라서 X는 다음 식으로 변환한다.
+
+```cpp
+ClipX = PixelX / ScreenWidth * 2.0f - 1.0f;
+```
+
+Y는 화면 픽셀 좌표와 방향이 반대이므로 다음 식을 사용한다.
+
+```cpp
+ClipY = 1.0f - PixelY / ScreenHeight * 2.0f;
+```
+
+이 변환 덕분에 HUD 코드는 `화면 중앙`, `화면 아래에서 100픽셀` 같은 직관적인 위치를 사용할 수 있다.
+
+## 7. Dynamic Vertex Buffer와 Map/Unmap
+
+UI의 정점 개수와 위치는 매 프레임 달라진다. 그래서 UI 정점 버퍼를 Dynamic으로 생성한다.
+
+```cpp
+UIDesc.ByteWidth = sizeof(UIVertex) * MaxVertexCount;
+UIDesc.Usage = D3D11_USAGE_DYNAMIC;
+UIDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+UIDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+```
+
+`ByteWidth`는 정점 하나의 크기가 아니라 버퍼 전체 용량이다.
+
+```text
+정점 한 개 크기 × 최대 정점 개수
+```
+
+`BeginFrame()`에서 CPU의 `Vertices`와 `Batches`를 비우고, 그 프레임에 필요한 UI를 다시 등록한다. `EndFrame()`에서는 `Map(D3D11_MAP_WRITE_DISCARD)`으로 새 메모리를 받아 정점 배열 전체를 복사하고 `Unmap()`으로 GPU 사용을 허용한다.
+
+```text
+BeginFrame
+    → CPU UI 목록 초기화
+
+AddRectangle / AddRectanglePixelsImage
+    → CPU vector에 정점 축적
+
+EndFrame
+    → Map
+    → memcpy_s
+    → Unmap
+    → Draw
+```
+
+`WRITE_DISCARD`는 이전 프레임의 내용을 유지할 필요가 없다는 뜻이다. 매 프레임 UI를 처음부터 다시 만들기 때문에 이 사용법과 잘 맞는다.
+
+## 8. UIBatch가 필요한 이유
+
+한 번의 Vertex Buffer 업로드에 여러 UI를 넣어도 Texture가 달라지면 Draw 전에 Texture를 다시 Bind해야 한다. 이를 나타내는 것이 `UIBatch`다.
+
+```cpp
+struct UIBatch
+{
+    Texture* TextureSet = nullptr;
+    UINT StartVertex = 0;
+    UINT VertexCount = 0;
+};
+```
+
+예를 들어 UI 등록 순서가 다음과 같다고 하자.
+
+```text
+흰 Texture 조준점 가로
+흰 Texture 조준점 세로
+EKey Texture
+흰 Texture 진행 바 배경
+흰 Texture 진행 바 내부
+```
+
+연속해서 같은 Texture를 사용하는 사각형은 하나의 Batch로 합칠 수 있다.
+
+```text
+Batch 0: 흰 Texture, 정점 12개
+Batch 1: EKey Texture, 정점 6개
+Batch 2: 흰 Texture, 정점 12개
+```
+
+`EndFrame()`은 Vertex Buffer를 한 번만 Map하고, Batch마다 Texture를 Bind한 다음 해당 정점 범위만 Draw한다.
+
+```cpp
+for (auto& Batch : Batches)
+{
+    Batch.TextureSet->Bind(DeviceContext);
+    DeviceContext->Draw(
+        Batch.VertexCount,
+        Batch.StartVertex);
+}
+```
+
+`StartVertex`는 전체 정점 배열 중 이번 Draw가 시작할 위치이고, `VertexCount`는 그 위치부터 처리할 정점 개수다.
+
+## 9. 알파 블렌딩의 원리
+
+Pixel Shader가 알파값을 출력하는 것만으로 기존 화면과 자동으로 섞이지 않는다. Output Merger에 BlendState를 설정해야 한다.
+
+일반적인 UI의 RGB 혼합 공식은 다음과 같다.
+
+```text
+최종 색
+= 새 UI 색 × 새 UI 알파
++ 기존 화면 색 × (1 - 새 UI 알파)
+```
+
+Direct3D 11 설정으로 표현하면 다음과 같다.
+
+```cpp
+SrcBlend  = D3D11_BLEND_SRC_ALPHA;
+DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+BlendOp   = D3D11_BLEND_OP_ADD;
+```
+
+알파가 0이면 새 UI의 기여도는 0이고 기존 화면이 그대로 남는다. 알파가 1이면 새 UI 색이 완전히 표시된다. 중간값이면 둘이 비율에 따라 섞인다.
+
+UI를 그리기 전에 기존 BlendState를 보관하고, UI가 끝난 뒤 복원한다. `OMGetBlendState()`로 얻은 COM 포인터는 참조 횟수가 증가하므로 사용 후 `Release()`가 필요하다.
+
+## 10. PNG의 픽셀 알파와 전체 UI 알파
+
+피격 테두리 PNG는 중앙 픽셀의 알파가 0이고 가장자리의 피 부분만 알파를 가진다. 여기에 `DamageAlpha`를 정점 Color의 알파로 전달한다.
+
+```cpp
+{ 1.0f, 1.0f, 1.0f, DamageAlpha }
+```
+
+Pixel Shader에서 두 색을 곱하므로 최종 알파는 다음과 같다.
+
+```text
+최종 알파 = PNG 픽셀 알파 × DamageAlpha
+```
+
+중앙의 PNG 알파가 0이면 `DamageAlpha`가 1이어도 중앙은 계속 투명하다. 가장자리의 PNG 알파가 1인 픽셀은 체력에 따른 `DamageAlpha`가 그대로 적용된다.
+
+## 11. 3회 피격과 무적 시간
+
+PlayerActor가 다음 상태를 소유한다.
+
+```cpp
+int MaxHealth = 3;
+int CurrentHealth = 3;
+float InvincibleDuration = 1.0f;
+float InvincibleTimer = 0.0f;
+```
+
+Monster의 Attack은 매 프레임 실행될 수 있다. 무적 시간이 없다면 60 FPS에서 한 프레임마다 체력이 감소하여 거의 즉시 죽는다. `TakeDamage()`는 무적 타이머가 남아 있는 동안 추가 피해를 무시한다.
+
+```text
+첫 공격
+    → 체력 감소
+    → InvincibleTimer = 1초
+
+다음 프레임의 공격
+    → InvincibleTimer > 0
+    → 피해 무시
+
+PlayerActor::OnUpdate
+    → InvincibleTimer -= DeltaTime
+    → 0이 되면 다시 피해 가능
+```
+
+피격 UI 알파는 별도 변수를 중복 저장하지 않고 체력에서 계산한다.
+
+```cpp
+DamageAlpha =
+    1.0f -
+    float(CurrentHealth) / float(MaxHealth);
+```
+
+```text
+체력 3 → 알파 0.000
+체력 2 → 알파 0.333
+체력 1 → 알파 0.667
+체력 0 → 알파 1.000
+```
+
+### 현재 TakeDamage에서 확인할 사항
+
+사망 분기에서 `CurrentHealth = 0`과 `Kill()`을 실행한 뒤에는 반드시 함수가 끝나야 한다. 현재 코드처럼 사망 처리 이후 공통 감소 코드까지 실행하면 체력이 `-1`이 될 수 있다.
+
+```text
+CurrentHealth = 0
+Kill()
+return 필요
+```
+
+이 문제는 렌더링 빌드 오류가 아니라 실행 중 값이 잘못되는 논리 오류다.
+
+## 12. Interactable 인터페이스와 발전기
+
+상호작용 가능한 객체가 공통으로 제공해야 하는 함수는 다음 하나다.
+
+```cpp
+virtual void Interact(float DeltaTime) = 0;
+```
+
+PlayerController는 Raycast 결과의 Actor가 구체적으로 발전기인지 직접 알 필요 없이 `Interactable`인지 검사한다.
+
+```cpp
+Interactable* Target =
+    dynamic_cast<Interactable*>(OutHit.HitActor);
+```
+
+변환에 성공하면 해당 객체가 `Interact()`를 구현한 것이다. 앞으로 문, 레버, 아이템도 같은 인터페이스를 구현할 수 있다.
+
+```text
+PlayerController
+    Interactable만 찾음
+
+GeneratorActor
+    수리 시간을 증가시킴
+
+DoorActor
+    문을 열 수 있음
+```
+
+## 13. 대상 탐색과 E 입력을 분리한 이유
+
+E를 누른 뒤에만 Raycast하면 E 안내 아이콘을 미리 표시할 수 없다. 그래서 현재 코드는 매 프레임 카메라 중앙에서 Raycast하고 상태를 나눈다.
+
+```text
+bFocusGenerator
+    상호작용 대상을 바라보고 있지만 E는 누르지 않음
+
+bInteracting
+    상호작용 대상을 바라보면서 E를 누르는 중
+```
+
+```text
+Raycast는 매 프레임 실행
+Interact는 E가 눌렸을 때만 실행
+```
+
+현재 이름 `bFocusGenerator`는 발전기에 한정된 것처럼 보이지만 실제 코드는 모든 `Interactable`에 true가 된다. 문이나 아이템을 추가할 때는 `bHasFocusedInteractable`처럼 일반적인 이름으로 바꾸거나, `CurrentFocusActor`가 실제 발전기와 같은지 비교하는 편이 정확하다.
+
+## 14. 발전기 수리 시간과 진행률
+
+발전기는 누적 수리 시간과 필요한 전체 시간을 저장한다.
+
+```cpp
+float TotalRepairTime = 3.0f;
+float CurrentRepairTime = 0.0f;
+```
+
+E를 누르는 동안 매 프레임 전달되는 `DeltaTime`을 더한다.
+
+```cpp
+CurrentRepairTime += DeltaTime;
+```
+
+진행률은 누적 시간을 전체 시간으로 나눈 0부터 1 사이의 값이다.
+
+```cpp
+RepairProgress =
+    CurrentRepairTime / TotalRepairTime;
+```
+
+3초가 필요한 발전기를 1.5초 수리했다면 진행률은 `1.5 / 3.0 = 0.5`다. `std::min(1.0f, ...)`으로 최대값을 제한하여 UI 너비가 배경을 넘어가지 않게 한다.
+
+## 15. 진행 바의 수학
+
+프로그레스 바는 별도의 특별한 Direct3D 객체가 아니다. 배경 사각형과 채움 사각형 두 개로 만든다.
+
+```text
+검은 배경  [____________________]
+노란 채움  [████████____________]
+```
+
+채움의 오른쪽 좌표는 다음 식으로 계산한다.
+
+```cpp
+FillRight =
+    FillLeft + InnerWidth * RepairProgress;
+```
+
+내부 너비가 792픽셀이라면 다음 결과가 나온다.
+
+```text
+진행률 0.00 → 채움 0픽셀
+진행률 0.25 → 채움 198픽셀
+진행률 0.50 → 채움 396픽셀
+진행률 1.00 → 채움 792픽셀
+```
+
+`Padding`을 사용하면 검은 배경의 가장자리가 남아 진행 바의 테두리처럼 보인다.
+
+## 16. 발전기용 임시 박스 모델
+
+기존 `Test.obj`는 박스가 아니라 정점 3개와 Face 1개로 구성된 삼각형이었다. 이를 덮어쓰지 않고 발전기 전용 파일을 추가했다.
+
+```text
+GeneratorBox.obj
+    위치 정점 8개
+    면 6개
+    면별 UV
+    면별 Normal
+
+GeneratorBox.mtl
+    GeneratorBoxMaterial
+    기존 TestTexture.png를 임시 Diffuse Texture로 사용
+```
+
+OBJ의 사각형 면은 Model Loader의 `aiProcess_Triangulate`에 의해 삼각형 두 개씩으로 변환된다. 따라서 최종적으로 박스는 삼각형 12개로 렌더링된다.
+
+`LightSaverGame`에서는 의미가 불분명한 `TestModel` 대신 `GeneratorModel`이라는 이름으로 발전기 모델을 소유한다.
+
+## 17. 다음 게임플레이 목표
+
+현재는 발전기 수리 완료 즉시 `GameClear`로 바뀐다. 최종 게임 규칙은 다음처럼 변경할 예정이다.
+
+```text
+발전기 수리 완료
+    → 탈출구 활성화
+    → 아직 Playing 상태 유지
+
+활성화된 탈출 구역에 Player 진입
+    → GameClear
+```
+
+이를 위해 다음 단계에서 이동을 막지 않는 `ExitZoneActor` Trigger 영역을 만들 예정이다. 이후 맵의 기능 배치를 확정하고 거리 안개, 3D 방향 사운드, 시작 및 재시작 UI를 연결한다.

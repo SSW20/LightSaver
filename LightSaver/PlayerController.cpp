@@ -3,6 +3,7 @@
 #include "InputManager.h"
 #include <cmath>
 #include "World.h"
+#include "Interactable.h"
 
 
 
@@ -13,7 +14,7 @@ void PlayerController::Update(float DeltaTime, InputManager& Input, World& GameW
 	UpdateMovement(DeltaTime, Input, GameWorld);
 	UpdateVerticalMovement(DeltaTime, Input, GameWorld);
 	UpdateRotation(Input);
-	UpdateInteraction(Input, GameWorld);
+	UpdateInteraction(Input, GameWorld, DeltaTime);
 }
 
 void PlayerController::Possess(PlayerActor* InPlayer)
@@ -148,22 +149,33 @@ void PlayerController::UpdateVerticalMovement(float DeltaTime, InputManager& Inp
 	ControlledPlayer->SetPlayerPosition(PlayerPosition);
 }
 
-void PlayerController::UpdateInteraction(InputManager& Input, World& GameWorld)
+void PlayerController::UpdateInteraction(InputManager& Input, World& GameWorld, float DeltaTime)
 {
 	if (MainCamera == nullptr)
 	{
 		return;
 	}
 
-	if (!Input.IsKeyPressed('E'))
-	{
-		return;
-	}
+	CurrentFocusActor = nullptr;
+	bFocusGenerator = false;
+	bInteracting = false;
 
 	Ray CameraRay = {};
 	DirectX::XMStoreFloat3(&CameraRay.Direction, MainCamera->GetForwardVector());
 	DirectX::XMStoreFloat3(&CameraRay.Origin, MainCamera->GetCameraPosition());
 
 	RaycastHitResult OutHit;
-	GameWorld.Raycast(CameraRay, 20.0f, OutHit);
+	if (!GameWorld.Raycast(CameraRay, 2.0f, OutHit)) return;
+	Interactable* Target = dynamic_cast<Interactable*>(OutHit.HitActor);
+	CurrentFocusActor = OutHit.HitActor;
+
+	if (Target == nullptr) return;
+
+	bFocusGenerator = true;
+	if (Input.IsKeyDown('E'))
+	{
+		bInteracting = true;
+		bFocusGenerator = false;
+		Target->Interact(DeltaTime);
+	}
 }

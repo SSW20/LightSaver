@@ -2,7 +2,7 @@
 
 bool GameLoop::Initialize(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-	if (!windows.Initialize(hInstance, hPrevInstance, lpCmdLine, nCmdShow)) return false;
+	if (!windows.Initialize(hInstance, hPrevInstance, lpCmdLine, nCmdShow, graphics.Width, graphics.Height)) return false;
 	if (!Input.Initialize(windows.GetHWND())) return false;
 	if (!graphics.Initialize(windows.GetHWND())) return false;
 	if (!OnInitialize()) return false;

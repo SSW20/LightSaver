@@ -11,8 +11,8 @@ public:
 	{
 		DXGI_SWAP_CHAIN_DESC sd = {};
 		sd.BufferCount = 1;
-		sd.BufferDesc.Width = 1280;
-		sd.BufferDesc.Height = 720;
+		sd.BufferDesc.Width = Width;
+		sd.BufferDesc.Height = Height;
 		sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 		sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
 		sd.SampleDesc.Count = 1;
@@ -32,8 +32,8 @@ public:
 		BackBuffer->Release();
 
 		D3D11_TEXTURE2D_DESC DepthDesc = {};
-		DepthDesc.Width = 1280;
-		DepthDesc.Height = 720;
+		DepthDesc.Width = Width;
+		DepthDesc.Height = Height;
 		DepthDesc.MipLevels = 1;
 		DepthDesc.ArraySize = 1;
 		DepthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -72,4 +72,6 @@ public:
 	ID3D11RenderTargetView* RTV = nullptr;
 	ID3D11DepthStencilView* DSV = nullptr;
 	ID3D11Texture2D* DepthBuffer = nullptr;
+	float Width = 1280.0f;
+	float Height = 720.0f;
 };

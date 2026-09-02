@@ -15,14 +15,20 @@ bool Renderer::Initialize(Graphics& InGraphics)
 {
 	ViewPort.TopLeftX = 0.f;
 	ViewPort.TopLeftY = 0.f;
-	ViewPort.Height = 720.f;
-	ViewPort.Width = 1280.f;
+	ViewPort.Height = InGraphics.Height;
+	ViewPort.Width = InGraphics.Width;
 	ViewPort.MaxDepth = 1.0f;
 	ViewPort.MinDepth = 0.0f;
 
+	D3D11_INPUT_ELEMENT_DESC layout[] = { 
+		{"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA,0 },
+		{"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D11_INPUT_PER_VERTEX_DATA,0 } 
+	};
+
 	Graphic = &InGraphics;
 
-	if (!ShaderSet.Initialize(Graphic->Device, L"shader.hlsl"))
+	if (!ShaderSet.Initialize(Graphic->Device, L"shader.hlsl", layout, 3))
 	{
 		return false;
 	}

@@ -31,3 +31,25 @@ void PlayerActor::Kill()
 	if (!bIsAlive) return;
 	bIsAlive = false;
 }
+
+void PlayerActor::TakeDamage(int Damage)
+{
+	if (!bIsAlive) return;
+	if (InvincibleTimer > 0.0f) return;
+	if (CurrentHealth <= Damage)
+	{
+		CurrentHealth = 0;
+		Kill();
+	}
+	InvincibleTimer = InvincibleDuration;
+	CurrentHealth -= Damage;
+}
+
+void PlayerActor::OnUpdate(float DeltaTime)
+{
+	if (InvincibleTimer > 0.0f)
+	{
+		InvincibleTimer -= DeltaTime;
+	}
+	InvincibleTimer = std::max(InvincibleTimer, 0.0f);
+}

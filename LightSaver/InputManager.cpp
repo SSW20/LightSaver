@@ -1,5 +1,6 @@
 #include "InputManager.h"
 #include <cmath>
+#include "UIRenderer.h"
 
 void InputManager::BeginFrame()
 {
@@ -48,6 +49,8 @@ void InputManager::BeginFrame()
 
 	SetCursorPos(Center.x, Center.y);
 }
+
+
 
 bool InputManager::IsKeyDown(int Key)
 {

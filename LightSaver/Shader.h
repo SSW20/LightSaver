@@ -4,7 +4,7 @@
 class Shader
 {
 public:
-	bool Initialize(ID3D11Device* Device, const wchar_t* FilePath);
+	bool Initialize(ID3D11Device* Device, const wchar_t* FilePath, const D3D11_INPUT_ELEMENT_DESC* layout, int NumElements);
 	void Bind(ID3D11DeviceContext* DeviceContext);
 	~Shader();
 
