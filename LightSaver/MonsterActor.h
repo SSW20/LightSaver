@@ -16,6 +16,7 @@ class MonsterActor : public Actor
 public:
 	void RegisterTarget(Actor* Player);
 	void Initialize(World* InWorld, NavigationGrid* InNav);
+	void Reset(const DirectX::XMFLOAT3& SpawnPosition);
 
 protected:
 	virtual void OnUpdate(float DeltaTime) override;

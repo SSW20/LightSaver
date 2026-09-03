@@ -26,6 +26,14 @@ void PlayerActor::SetPlayerPosition(const DirectX::XMFLOAT3& NewPosition)
 
 }
 
+void PlayerActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
+{
+	bIsAlive = true;
+	CurrentHealth = MaxHealth;
+	InvincibleTimer = 0.0f;
+	SetPlayerPosition(SpawnPosition);
+}
+
 void PlayerActor::Kill()
 {
 	if (!bIsAlive) return;
@@ -40,6 +48,7 @@ void PlayerActor::TakeDamage(int Damage)
 	{
 		CurrentHealth = 0;
 		Kill();
+		return;
 	}
 	InvincibleTimer = InvincibleDuration;
 	CurrentHealth -= Damage;

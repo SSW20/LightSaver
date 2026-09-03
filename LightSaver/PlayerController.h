@@ -12,6 +12,7 @@ public:
 	PlayerController() = default;
 	void Update(float DeltaTime,InputManager& Input,World& GameWorld);
 	void Possess(PlayerActor* InPlayer);
+	void Reset();
 
 	bool IsInteracting() { return bInteracting; }
 	bool IsFindGenerator() { return bFocusGenerator; }

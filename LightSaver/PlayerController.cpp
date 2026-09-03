@@ -30,6 +30,14 @@ void PlayerController::Possess(PlayerActor* InPlayer)
 	}
 }
 
+void PlayerController::Reset()
+{
+	VerticalVelocity = 0.0f;
+	CurrentFocusActor = nullptr;
+	bFocusGenerator = false;
+	bInteracting = false;
+}
+
 void PlayerController::UpdateRotation(InputManager& Input)
 {
 	if (MainCamera == nullptr)

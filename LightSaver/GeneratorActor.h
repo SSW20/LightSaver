@@ -9,6 +9,7 @@ public:
 	void Repairing(float DeltaTime);
 	float GetRepairProgress() const;
 	void Interact(float DeltaTime) override;
+	void Reset();
 
 private:
 	bool bRepaired = false;

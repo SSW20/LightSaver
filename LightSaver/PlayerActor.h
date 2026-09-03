@@ -10,6 +10,7 @@ public:
 	const Camera& GetCamera() const;
 	const DirectX::XMFLOAT3& GetPlayerPosition() const;
 	void SetPlayerPosition(const DirectX::XMFLOAT3& NewPosition);
+	void Reset(const DirectX::XMFLOAT3& SpawnPosition);
 	void Kill();
 	bool IsAlive() const { return bIsAlive; }
 

@@ -30,6 +30,8 @@ public:
 
 	~LightSaverGame() override;
 private:
+	void StartGame();
+
 	PlayerController MainPlayerController;
 	PlayerActor* MainPlayer = nullptr;
 	Model SpiderModel; 
@@ -39,8 +41,10 @@ private:
 	World GameWorld;
 	MonsterActor* SpiderActor = nullptr;
 	GeneratorActor* LightGenerator = nullptr;
-	GameState CurrentGameState = GameState::Playing;
+	GameState CurrentGameState = GameState::MainMenu;
 	Renderer RenderManager;
 	NavigationGrid MonsterNavGrid;
 	GameHUD HUD;
+	DirectX::XMFLOAT3 PlayerSpawnPosition = {};
+	DirectX::XMFLOAT3 SpiderSpawnPosition = {};
 };

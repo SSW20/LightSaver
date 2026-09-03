@@ -30,3 +30,9 @@ void GeneratorActor::Interact(float DeltaTime)
 {
     Repairing(DeltaTime);
 }
+
+void GeneratorActor::Reset()
+{
+	bRepaired = false;
+	CurrentRepairTime = 0.0f;
+}

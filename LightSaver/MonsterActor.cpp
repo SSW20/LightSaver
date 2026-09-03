@@ -238,3 +238,14 @@ void MonsterActor::RegisterTarget(Actor* TargetActor)
 	if (TargetActor == nullptr) return;
 	Target = dynamic_cast<PlayerActor*>(TargetActor);
 }
+
+void MonsterActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
+{
+	GetActorTransform().Position = SpawnPosition;
+	GetActorTransform().Rotation = { 0.0f, 0.0f, 0.0f };
+	GetActorTransform().UseEulerRotation();
+	CurrentState = MonsterState::Chase;
+	CurrentPath.clear();
+	CurrentPathIndex = 0;
+	PathUpdateTimer = 0.0f;
+}

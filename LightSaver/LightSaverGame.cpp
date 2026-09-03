@@ -59,12 +59,12 @@ bool LightSaverGame::OnInitialize()
 	const DirectX::XMFLOAT3 MonsterHalfSize = { 0.4f,0.5f,0.4f };
 
 	RaycastHitResult GroundHit = {};
-	DirectX::XMFLOAT3 PlayerSpawnPosition = { 0.0f, GridMax.y, 0.0f };
+	PlayerSpawnPosition = { 0.0f, GridMax.y, 0.0f };
 	if (!GameWorld.FindFloor(PlayerSpawnPosition, 0.0f, GridMax.y - GridMin.y, GroundHit)) return false;
 	PlayerSpawnPosition.y = GroundHit.Position.y + 0.8f;
 	MainPlayer->SetPlayerPosition(PlayerSpawnPosition);
 
-	DirectX::XMFLOAT3 SpiderSpawnPosition = { 0.0f, GridMax.y, 12.0f };
+	SpiderSpawnPosition = { 0.0f, GridMax.y, 12.0f };
 	if (!GameWorld.FindFloor(SpiderSpawnPosition, 0.0f, GridMax.y - GridMin.y, GroundHit)) return false;
 	SpiderSpawnPosition.y = GroundHit.Position.y + 0.4223f;
 	SpiderActor->GetActorTransform().Position = SpiderSpawnPosition;
@@ -75,15 +75,33 @@ bool LightSaverGame::OnInitialize()
 	RenderManager.Initialize(GetGraphics());
 	HUD.Initialize(GetGraphics());
 	
-	ShowCursor(FALSE);
-
 	return true;
 }
 
 void LightSaverGame::Update(float deltaTime)
 {
-	if (CurrentGameState != GameState::Playing)
+	if (CurrentGameState == GameState::MainMenu)
 	{
+		if (GetInput().IsKeyPressed('E'))
+		{
+			StartGame();
+		}
+
+		return;
+	}
+
+	if (CurrentGameState == GameState::PlayerDead || CurrentGameState == GameState::GameClear)
+	{
+		const GameHUDAction Action = HUD.UpdateResultInput(CurrentGameState, GetInput());
+		if (Action == GameHUDAction::StartGame)
+		{
+			StartGame();
+		}
+		else if (Action == GameHUDAction::ExitGame)
+		{
+			RequestExit();
+		}
+
 		return;
 	}
 
@@ -93,13 +111,37 @@ void LightSaverGame::Update(float deltaTime)
 	if (MainPlayer != nullptr && !MainPlayer->IsAlive())
 	{
 		CurrentGameState = GameState::PlayerDead;
+		GetInput().SetMouseLocked(false);
 		return;
 	}
 
 	if (LightGenerator != nullptr && LightGenerator->IsRepaired())
 	{
 		CurrentGameState = GameState::GameClear;
+		GetInput().SetMouseLocked(false);
 	}
+}
+
+void LightSaverGame::StartGame()
+{
+	if (MainPlayer != nullptr)
+	{
+		MainPlayer->Reset(PlayerSpawnPosition);
+	}
+
+	if (SpiderActor != nullptr)
+	{
+		SpiderActor->Reset(SpiderSpawnPosition);
+	}
+
+	if (LightGenerator != nullptr)
+	{
+		LightGenerator->Reset();
+	}
+
+	MainPlayerController.Reset();
+	CurrentGameState = GameState::Playing;
+	GetInput().SetMouseLocked(true);
 }
 
 bool LightSaverGame::Render()

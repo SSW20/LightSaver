@@ -25,6 +25,19 @@ void InputManager::BeginFrame()
 		CurrentKeys[Key] = (GetAsyncKeyState(Key) & 0x8000) != 0;
 	}
 
+	POINT MousePos;
+	GetCursorPos(&MousePos);
+	MouseClientPosition = MousePos;
+	ScreenToClient(WindowHandle, &MouseClientPosition);
+
+	if (!bMouseLocked)
+	{
+		MouseDeltaX = 0;
+		MouseDeltaY = 0;
+		FirstWindowActive = true;
+		return;
+	}
+
 	RECT ClientSize;
 	GetClientRect(WindowHandle, &ClientSize);
 
@@ -33,9 +46,6 @@ void InputManager::BeginFrame()
 	Center.y = (ClientSize.top + ClientSize.bottom) / 2;
 
 	ClientToScreen(WindowHandle, &Center);
-
-	POINT MousePos;
-	GetCursorPos(&MousePos);
 
 	if (FirstWindowActive)
 	{
@@ -52,7 +62,7 @@ void InputManager::BeginFrame()
 
 
 
-bool InputManager::IsKeyDown(int Key)
+bool InputManager::IsKeyDown(int Key) const
 {
 	if (GetForegroundWindow() != WindowHandle) return false;
 	if (CurrentKeys[Key])
@@ -62,7 +72,7 @@ bool InputManager::IsKeyDown(int Key)
 	return false;
 }
 
-bool InputManager::IsKeyPressed(int Key)
+bool InputManager::IsKeyPressed(int Key) const
 {
 	if (GetForegroundWindow() != WindowHandle) return false;
 	if (CurrentKeys[Key] && !PreviousKeys[Key])
@@ -72,7 +82,7 @@ bool InputManager::IsKeyPressed(int Key)
 	return false;
 }
 
-bool InputManager::IsKeyReleased(int Key)
+bool InputManager::IsKeyReleased(int Key) const
 {
 	if (GetForegroundWindow() != WindowHandle) return false;
 	if (!CurrentKeys[Key] && PreviousKeys[Key])
@@ -87,4 +97,27 @@ bool InputManager::Initialize(HWND hWnd)
 	if (hWnd == NULL) return false;
 	WindowHandle = hWnd;
 	return true;
+}
+
+void InputManager::SetMouseLocked(bool bLocked)
+{
+	if (bMouseLocked == bLocked) return;
+
+	bMouseLocked = bLocked;
+	MouseDeltaX = 0;
+	MouseDeltaY = 0;
+	FirstWindowActive = true;
+
+	if (bMouseLocked)
+	{
+		while (ShowCursor(FALSE) >= 0)
+		{
+		}
+	}
+	else
+	{
+		while (ShowCursor(TRUE) < 0)
+		{
+		}
+	}
 }

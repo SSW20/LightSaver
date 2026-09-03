@@ -5,9 +5,11 @@ class InputManager
 public:
 	bool Initialize(HWND hWnd);
 	void BeginFrame();
-	bool IsKeyDown(int Key);
-	bool IsKeyPressed(int Key);
-	bool IsKeyReleased(int Key);
+	bool IsKeyDown(int Key) const;
+	bool IsKeyPressed(int Key) const;
+	bool IsKeyReleased(int Key) const;
+	POINT GetMouseClientPosition() const { return MouseClientPosition; }
+	void SetMouseLocked(bool bLocked);
 	long GetDeltaX() { return MouseDeltaX; }
 	long GetDeltaY() { return MouseDeltaY; }
 
@@ -18,5 +20,7 @@ private:
 	bool CurrentKeys[256] = {};
 	bool PreviousKeys[256] = {};
 	bool FirstWindowActive = true;
+	bool bMouseLocked = false;
+	POINT MouseClientPosition = {};
 };
 
