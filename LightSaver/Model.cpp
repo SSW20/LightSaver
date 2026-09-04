@@ -6,7 +6,7 @@
 #include <algorithm>
 
 
-bool Model::Initialize(ID3D11Device* Device,  const std::string& FilePath)
+bool Model::Initialize(ID3D11Device* Device, const std::string& FilePath, const wchar_t* DefaultTexturePath)
 {
 	/*
 		Triangulate
@@ -81,18 +81,22 @@ bool Model::Initialize(ID3D11Device* Device,  const std::string& FilePath)
 	{
 		auto NewTexture = std::make_unique<Texture>();
 		aiMaterial* SourceMaterial = Scene->mMaterials[i];
-		if (SourceMaterial->GetTextureCount(aiTextureType_DIFFUSE) == 0)
-		{
-			NewTexture->InitializeByColor(Device, 255,255,255,255);
-			MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
-		}
-
 		aiString TexturePath;
 		if (SourceMaterial->GetTexture(aiTextureType_DIFFUSE, 0, &TexturePath) == AI_SUCCESS) 
 		{
 			std::filesystem::path FullTexturePath = ModelPath.parent_path() / TexturePath.C_Str();
 
 			if (!NewTexture->Initialize(Device, FullTexturePath.c_str())) return false;
+			MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
+		}
+		else if (DefaultTexturePath != nullptr)
+		{
+			if (!NewTexture->Initialize(Device, DefaultTexturePath)) return false;
+			MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
+		}
+		else
+		{
+			NewTexture->InitializeByColor(Device, 255, 255, 255, 255);
 			MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
 		}
 

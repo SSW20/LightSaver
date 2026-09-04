@@ -17,6 +17,9 @@ public:
 	void TakeDamage(int Damage);
 	float GetDamageAlpha() const { return 1.0f - float(CurrentHealth) / float(MaxHealth); }
 	int GetCurrentHealth() const { return CurrentHealth; }
+	void ToggleFlashlight();
+	bool IsFlashlightOn() const { return bFlashlightOn; }
+	float GetFlashlightCooldownRatio() const;
 
 protected:
 	void OnUpdate(float DeltaTime) override;
@@ -29,4 +32,10 @@ private:
 
 	float InvincibleDuration = 1.0f;
 	float InvincibleTimer = 0.0f;
+
+	bool bFlashlightOn = false;
+	float FlashlightDuration = 4.0f;
+	float FlashlightRemainingTime = 0.0f;
+	float FlashlightCooldown = 3.0f;
+	float FlashlightCooldownTimer = 0.0f;
 };

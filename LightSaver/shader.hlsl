@@ -22,7 +22,8 @@ cbuffer LightBuffer : register(b2)
 
     float SpotOuterCos;
     float SpotInnerCos;
-    float2 LightPadding;
+    float LightEnabled;
+    float LightPadding;
 
 }
 
@@ -31,6 +32,15 @@ cbuffer MaterialBuffer : register(b3)
     float SpecularStrength;
     float SpecularPower;
     float2 MaterialPadding;
+}
+
+cbuffer FogBuffer : register(b4)
+{
+    float3 CameraPosition;
+    float FogDensity;
+
+    float3 FogColor;
+    float FogPadding;
 }
 
 Texture2D DiffuseTexture : register(t0);
@@ -93,10 +103,16 @@ float4 PS_Main(PS_INPUT input) : SV_TARGET
 
     
     float3 AmbientLight = TextureColor.rgb * AmbientStrength;
-    float3 DiffuseLight = TextureColor.rgb * LightColor * Diffuse * DiffuseStrength * DistanceAttenuation * SpotAttenuation;
-    float3 SpecularLight = TextureColor.rgb * LightColor * Specular * SpecularStrength * DistanceAttenuation * SpotAttenuation;
+    float3 DiffuseLight = TextureColor.rgb * LightColor * Diffuse * DiffuseStrength * DistanceAttenuation * SpotAttenuation * LightEnabled;
+    float3 SpecularLight = TextureColor.rgb * LightColor * Specular * SpecularStrength * DistanceAttenuation * SpotAttenuation * LightEnabled;
 
 
-    return float4(AmbientLight + DiffuseLight + SpecularLight, TextureColor.a);
+    float3 LitColor = AmbientLight + DiffuseLight + SpecularLight;
+
+    float CameraDistance = length(input.worldPosition - CameraPosition);
+    float FogAmount = saturate(1.0f - exp(-FogDensity * CameraDistance));
+    float3 FinalColor = lerp(LitColor, FogColor, FogAmount);
+
+    return float4(FinalColor, TextureColor.a);
 
 }

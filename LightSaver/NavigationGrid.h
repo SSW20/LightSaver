@@ -14,17 +14,19 @@ class NavigationGrid
 public:
 	bool Build(World& GameWorld, const DirectX::XMFLOAT3& MinBounds, const DirectX::XMFLOAT3& MaxBounds, float InCellSize, const DirectX::XMFLOAT3& ActorHalfSize);
 	bool ConvertToCell(const DirectX::XMFLOAT3& WorldPosition, int& OutColumn, int& OutRow);
-	void GetWalkableNeighborIndices(int Column, int Row, std::vector<int>& OutNeighborIndices);
+	void GetWalkableNeighborIndices(int Column, int Row, std::vector<int>& OutNeighborIndices) const;
 	const NavigationCell* GetCell(int Column, int Row) const;
 	bool FindPath(const DirectX::XMFLOAT3& StartWorldPosition, const DirectX::XMFLOAT3& GoalWorldPosition, std::vector<DirectX::XMFLOAT3>& OutPath);
 private:
 	int GetIndex(int Column, int Row) const;
+	float CalculateHeuristic(int Column, int Row, int GoalColumn, int GoalRow) const;
 
 	std::vector<NavigationCell> Cells;
 
 	int ColumnCount = 0;
 	int RowCount = 0;
 	float CellSize = 1.0f;
+	float MaxStepHeight = 0.4f;
 
 	DirectX::XMFLOAT3 MinBounds = {};
 	DirectX::XMFLOAT3 MaxBounds = {};

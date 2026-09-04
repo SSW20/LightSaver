@@ -15,6 +15,7 @@ void PlayerController::Update(float DeltaTime, InputManager& Input, World& GameW
 	UpdateVerticalMovement(DeltaTime, Input, GameWorld);
 	UpdateRotation(Input);
 	UpdateInteraction(Input, GameWorld, DeltaTime);
+	UpdateFlashlight(Input);
 }
 
 void PlayerController::Possess(PlayerActor* InPlayer)
@@ -97,21 +98,36 @@ void PlayerController::UpdateMovement(float DeltaTime, InputManager& Input, Worl
 	DirectX::XMStoreFloat3(&MoveAmount, Movement);
 	DirectX::XMFLOAT3 PlayerPosition = ControlledPlayer->GetPlayerPosition();
 
-	DirectX::XMFLOAT3 TestPosition = PlayerPosition;
-	TestPosition.x += MoveAmount.x;
-	if (!GameWorld.OverlapAABB(CreateAABBFromCenter(TestPosition, PlayerHalfSize)))
+	// 긴 프레임에 이동량이 벽 두께보다 커져도 반대편으로 건너뛰지 않도록
+	// 한 번의 이동을 최대 0.1 단위로 나누어 충돌 검사한다.
+	constexpr float MaxCollisionStep = 0.1f;
+	const float MovementDistance = std::sqrt(
+		MoveAmount.x * MoveAmount.x + MoveAmount.z * MoveAmount.z);
+	int MovementStepCount = static_cast<int>(std::ceil(MovementDistance / MaxCollisionStep));
+	if (MovementStepCount < 1)
 	{
-		PlayerPosition.x = TestPosition.x;
+		MovementStepCount = 1;
 	}
 
-	// Z 이동 검사
-	// 여기서는 성공한 X 위치가 포함됨
-	TestPosition = PlayerPosition;
-	TestPosition.z += MoveAmount.z;
+	const float StepX = MoveAmount.x / MovementStepCount;
+	const float StepZ = MoveAmount.z / MovementStepCount;
 
-	if (!GameWorld.OverlapAABB(CreateAABBFromCenter(TestPosition, PlayerHalfSize)))
+	for (int StepIndex = 0; StepIndex < MovementStepCount; ++StepIndex)
 	{
-		PlayerPosition.z = TestPosition.z;
+		DirectX::XMFLOAT3 TestPosition = PlayerPosition;
+		TestPosition.x += StepX;
+		if (!GameWorld.OverlapAABB(CreateAABBFromCenter(TestPosition, PlayerHalfSize)))
+		{
+			PlayerPosition.x = TestPosition.x;
+		}
+
+		// 성공한 X 위치를 기준으로 Z도 따로 검사해서 벽을 따라 미끄러지게 한다.
+		TestPosition = PlayerPosition;
+		TestPosition.z += StepZ;
+		if (!GameWorld.OverlapAABB(CreateAABBFromCenter(TestPosition, PlayerHalfSize)))
+		{
+			PlayerPosition.z = TestPosition.z;
+		}
 	}
 
 	ControlledPlayer->SetPlayerPosition(PlayerPosition);
@@ -185,5 +201,15 @@ void PlayerController::UpdateInteraction(InputManager& Input, World& GameWorld, 
 		bInteracting = true;
 		bFocusGenerator = false;
 		Target->Interact(DeltaTime);
+	}
+}
+
+void PlayerController::UpdateFlashlight(InputManager& Input)
+{
+	if (ControlledPlayer == nullptr) return;
+
+	if (Input.IsKeyPressed(VK_LBUTTON))
+	{
+		ControlledPlayer->ToggleFlashlight();
 	}
 }

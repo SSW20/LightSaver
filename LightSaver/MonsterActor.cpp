@@ -1,9 +1,27 @@
 #include "MonsterActor.h"
 #include "NavigationGrid.h"
+#include <cmath>
+
+namespace
+{
+	constexpr float FloorBoundaryY = 3.0f;
+	constexpr float StairEntryRadius = 0.75f;
+	const DirectX::XMFLOAT3 MonsterCollisionHalfSize = { 0.8f, 0.5f, 0.8f };
+	const DirectX::XMFLOAT3 StairBottom = { -12.0f, 0.2f, -8.4f };
+	const DirectX::XMFLOAT3 StairTop = { -12.0f, 5.2f, 6.0f };
+
+	float GetDistanceXZ(const DirectX::XMFLOAT3& A, const DirectX::XMFLOAT3& B)
+	{
+		const float DeltaX = B.x - A.x;
+		const float DeltaZ = B.z - A.z;
+		return std::sqrt(DeltaX * DeltaX + DeltaZ * DeltaZ);
+	}
+}
 
 void MonsterActor::OnUpdate(float DeltaTime)
 {
-	if (Target == nullptr || GameWorld == nullptr || NavGrid == nullptr) return;
+	if (Target == nullptr || GameWorld == nullptr ||
+		FirstFloorNavGrid == nullptr || SecondFloorNavGrid == nullptr) return;
 	if (!Target->IsAlive()) return;
 
 	DirectX::XMVECTOR ActorPos = DirectX::XMLoadFloat3(&GetActorTransform().Position);
@@ -28,6 +46,7 @@ void MonsterActor::OnUpdate(float DeltaTime)
 		UpdateAttack();
 		break;
 	}
+
 }
 
 void MonsterActor::UpdateState(bool bInLight, float DistanceToTarget)
@@ -59,19 +78,63 @@ void MonsterActor::ChangeState(MonsterState NewState)
 
 void MonsterActor::UpdateChase(float DeltaTime)
 {
+	const DirectX::XMFLOAT3 ActorPosition = GetActorTransform().Position;
+	const DirectX::XMFLOAT3 TargetPosition = Target->GetActorTransform().Position;
 
-	PathUpdateTimer -= DeltaTime;
-	if (PathUpdateTimer <= 0.0f)
+	if (StairDirection != StairTravelDirection::None)
 	{
-		CurrentPath.clear();
-		CurrentPathIndex = 0;
-		bool bPathFound = NavGrid->FindPath(GetActorTransform().Position, Target->GetActorTransform().Position, CurrentPath);
+		const DirectX::XMFLOAT3& StairDestination =
+			StairDirection == StairTravelDirection::Up ? StairTop : StairBottom;
 
-		if (bPathFound && CurrentPath.size() > 1)
+		if (GetDistanceXZ(ActorPosition, StairDestination) < WaypointAcceptanceRadius)
 		{
-			CurrentPathIndex = 1;
+			StairDirection = StairTravelDirection::None;
+			CurrentPath.clear();
+			CurrentPathIndex = 0;
+			PathUpdateTimer = 0.0f;
+			return;
 		}
-		PathUpdateTimer = PathUpdateInterval;
+
+		CurrentPath.clear();
+		CurrentPath.push_back(StairDestination);
+		CurrentPathIndex = 0;
+	}
+	else
+	{
+		const bool bActorOnSecondFloor = ActorPosition.y >= FloorBoundaryY;
+		const bool bTargetOnSecondFloor = TargetPosition.y >= FloorBoundaryY;
+		NavigationGrid* ActiveNavGrid = bActorOnSecondFloor ? SecondFloorNavGrid : FirstFloorNavGrid;
+		DirectX::XMFLOAT3 PathTarget = TargetPosition;
+
+		if (bActorOnSecondFloor != bTargetOnSecondFloor)
+		{
+			const DirectX::XMFLOAT3& StairEntry = bActorOnSecondFloor ? StairTop : StairBottom;
+
+			if (GetDistanceXZ(ActorPosition, StairEntry) < StairEntryRadius)
+			{
+				StairDirection = bActorOnSecondFloor ? StairTravelDirection::Down : StairTravelDirection::Up;
+				CurrentPath.clear();
+				CurrentPathIndex = 0;
+				PathUpdateTimer = 0.0f;
+				return;
+			}
+
+			PathTarget = StairEntry;
+		}
+
+		PathUpdateTimer -= DeltaTime;
+		if (PathUpdateTimer <= 0.0f)
+		{
+			CurrentPath.clear();
+			CurrentPathIndex = 0;
+			bool bPathFound = ActiveNavGrid->FindPath(ActorPosition, PathTarget, CurrentPath);
+
+			if (bPathFound && CurrentPath.size() > 1)
+			{
+				CurrentPathIndex = 1;
+			}
+			PathUpdateTimer = PathUpdateInterval;
+		}
 	}
 
 	if (CurrentPathIndex >= CurrentPath.size()) return;
@@ -117,6 +180,11 @@ void MonsterActor::UpdateChase(float DeltaTime)
 	if (!GameWorld->FindFloor(CandidatePosition, RayStart, RayEnd, GroundHit)) return;
 
 	CandidatePosition.y = GroundHit.Position.y + GroundOffset;
+	if (GameWorld->OverlapAABB(CreateAABBFromCenter(CandidatePosition, MonsterCollisionHalfSize)))
+	{
+		return;
+	}
+
 	GetActorTransform().Position = CandidatePosition;
 
 	// 회전 설정
@@ -197,6 +265,8 @@ bool MonsterActor::HasLineOfSightToTarget()
 
 bool MonsterActor::IsInLight()
 {
+	if (Target == nullptr || !Target->IsFlashlightOn()) return false;
+
 	// 거리 30 , out 30 , in 7 
 	DirectX::XMVECTOR CameraForward = Target->GetCamera().GetForwardVector();
 	DirectX::XMVECTOR ActorPos = DirectX::XMLoadFloat3(&GetActorTransform().Position);
@@ -226,11 +296,15 @@ bool MonsterActor::IsInLight()
 
 }
 
-void MonsterActor::Initialize(World* InWorld, NavigationGrid* InNav)
+void MonsterActor::Initialize(
+	World* InWorld,
+	NavigationGrid* InFirstFloorNav,
+	NavigationGrid* InSecondFloorNav)
 {
-	if (InWorld == nullptr || InNav == nullptr) return;
+	if (InWorld == nullptr || InFirstFloorNav == nullptr || InSecondFloorNav == nullptr) return;
 	GameWorld = InWorld;
-	NavGrid = InNav;
+	FirstFloorNavGrid = InFirstFloorNav;
+	SecondFloorNavGrid = InSecondFloorNav;
 }
 
 void MonsterActor::RegisterTarget(Actor* TargetActor)
@@ -248,4 +322,5 @@ void MonsterActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
 	CurrentPath.clear();
 	CurrentPathIndex = 0;
 	PathUpdateTimer = 0.0f;
+	StairDirection = StairTravelDirection::None;
 }

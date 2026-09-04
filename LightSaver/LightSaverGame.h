@@ -16,10 +16,12 @@
 #include "NavigationGrid.h"
 #include "GameHUD.h"
 #include "GameState.h"
+#include "HospitalLevel.h"
 
 class Actor;
 class MeshComponent;
 class GeneratorActor;
+class ExitZoneActor;
 
 class LightSaverGame : public GameLoop
 {
@@ -35,15 +37,16 @@ private:
 	PlayerController MainPlayerController;
 	PlayerActor* MainPlayer = nullptr;
 	Model SpiderModel; 
-	Model FloorModel; 
-	Model WallModel;
 	Model GeneratorModel;
+	HospitalLevel Hospital;
 	World GameWorld;
 	MonsterActor* SpiderActor = nullptr;
 	GeneratorActor* LightGenerator = nullptr;
+	ExitZoneActor* ExitZone = nullptr;
 	GameState CurrentGameState = GameState::MainMenu;
 	Renderer RenderManager;
-	NavigationGrid MonsterNavGrid;
+	NavigationGrid FirstFloorMonsterNavGrid;
+	NavigationGrid SecondFloorMonsterNavGrid;
 	GameHUD HUD;
 	DirectX::XMFLOAT3 PlayerSpawnPosition = {};
 	DirectX::XMFLOAT3 SpiderSpawnPosition = {};

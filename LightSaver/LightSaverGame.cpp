@@ -8,13 +8,13 @@
 #include <vector>
 #include "MeshColliderComponent.h"
 #include "GeneratorActor.h"
+#include "ExitZoneActor.h"
 
 bool LightSaverGame::OnInitialize()
 {
 	if (!SpiderModel.Initialize(GetGraphics().Device, "Assets/Models/Spider/spider.obj")) return false;
-	if (!WallModel.Initialize(GetGraphics().Device, "Assets/Models/Room/Wall.obj")) return false;
-	if (!FloorModel.Initialize(GetGraphics().Device, "Assets/Models/TestTerrain.obj")) return false;
 	if (!GeneratorModel.Initialize(GetGraphics().Device, "Assets/Models/GeneratorBox.obj")) return false;
+	if (!Hospital.Initialize(GetGraphics().Device, GameWorld)) return false;
 
 	MainPlayer = GameWorld.SpawnActor<PlayerActor>();
 	MainPlayerController.Possess(MainPlayer);
@@ -26,7 +26,6 @@ bool LightSaverGame::OnInitialize()
 
 	LightGenerator = GameWorld.SpawnActor<GeneratorActor>();
 	LightGenerator->GetActorTransform().Scale = { 5.0f, 5.0f, 5.0f };
-	LightGenerator->GetActorTransform().Position = { 5.0f, 5.0f, 5.0f };
 	LightGenerator->AddComponent<MeshComponent>(&GeneratorModel);
 	LightGenerator->AddComponent<MeshColliderComponent>(&GeneratorModel);
 	BoxColliderComponent* LightGeneratorCollider = LightGenerator->AddComponent<BoxColliderComponent>();
@@ -35,42 +34,40 @@ bool LightSaverGame::OnInitialize()
 	LightGeneratorCollision.Max = { 0.5f,  0.5f,  0.1f };
 	LightGeneratorCollider->SetCollisionBox(LightGeneratorCollision);
 
-	Actor* WallActor;
-	Actor* FloorActor;
-	WallActor = GameWorld.SpawnActor<Actor>();
-	WallActor->GetActorTransform().Position = { 0.0f, 1.8f, 6.0f };
-	WallActor->GetActorTransform().Scale = { 8.0f, 4.5f, 1.0f };
-	WallActor->AddComponent<MeshComponent>(&WallModel);
-	BoxColliderComponent* WallCollider = WallActor->AddComponent<BoxColliderComponent>();
-
-	AABB WallCollision;
-	WallCollision.Min = { -0.5f, -0.5f, -0.1f };
-	WallCollision.Max = { 0.5f,  0.5f,  0.1f };
-	WallCollider->SetCollisionBox(WallCollision);
-
-	FloorActor = GameWorld.SpawnActor<Actor>();
-	FloorActor->GetActorTransform().Position = { 0.0f, -0.45f, 4.0f };
-	FloorActor->GetActorTransform().Scale = { 30.0f, 1.0f, 30.0f };
-	FloorActor->AddComponent<MeshComponent>(&FloorModel);
-	FloorActor->AddComponent<MeshColliderComponent>(&FloorModel);
-
-	const DirectX::XMFLOAT3 GridMin = { -14.5f,-1.0f,-10.5f };
-	const DirectX::XMFLOAT3 GridMax = { 14.5f,5.0f,18.5f };
-	const DirectX::XMFLOAT3 MonsterHalfSize = { 0.4f,0.5f,0.4f };
+	const DirectX::XMFLOAT3 FirstFloorMin = { -14.0f,-1.0f,-10.0f };
+	const DirectX::XMFLOAT3 FirstFloorMax = { 14.0f,4.5f,18.0f };
+	const DirectX::XMFLOAT3 SecondFloorGridMin = { -14.0f,4.5f,-10.0f };
+	const DirectX::XMFLOAT3 SecondFloorGridMax = { 14.0f,10.5f,18.0f };
+	const DirectX::XMFLOAT3 MonsterHalfSize = { 0.8f,0.5f,0.8f };
 
 	RaycastHitResult GroundHit = {};
-	PlayerSpawnPosition = { 0.0f, GridMax.y, 0.0f };
-	if (!GameWorld.FindFloor(PlayerSpawnPosition, 0.0f, GridMax.y - GridMin.y, GroundHit)) return false;
+	PlayerSpawnPosition = { 0.0f, FirstFloorMax.y, -6.0f };
+	if (!GameWorld.FindFloor(PlayerSpawnPosition, 0.0f, FirstFloorMax.y - FirstFloorMin.y, GroundHit)) return false;
 	PlayerSpawnPosition.y = GroundHit.Position.y + 0.8f;
 	MainPlayer->SetPlayerPosition(PlayerSpawnPosition);
 
-	SpiderSpawnPosition = { 0.0f, GridMax.y, 12.0f };
-	if (!GameWorld.FindFloor(SpiderSpawnPosition, 0.0f, GridMax.y - GridMin.y, GroundHit)) return false;
+	SpiderSpawnPosition = { 0.0f, SecondFloorGridMax.y, 14.0f };
+	if (!GameWorld.FindFloor(SpiderSpawnPosition, 0.0f, SecondFloorGridMax.y - SecondFloorGridMin.y, GroundHit)) return false;
 	SpiderSpawnPosition.y = GroundHit.Position.y + 0.4223f;
 	SpiderActor->GetActorTransform().Position = SpiderSpawnPosition;
 
-	if (!MonsterNavGrid.Build(GameWorld, GridMin, GridMax, 0.5f, MonsterHalfSize)) return false;
-	SpiderActor->Initialize(&GameWorld, &MonsterNavGrid);
+	DirectX::XMFLOAT3 GeneratorPosition = { 8.0f, SecondFloorGridMax.y, 8.0f };
+	if (!GameWorld.FindFloor(GeneratorPosition, 0.0f, SecondFloorGridMax.y - SecondFloorGridMin.y, GroundHit)) return false;
+	GeneratorPosition.y = GroundHit.Position.y + 2.5f;
+	LightGenerator->GetActorTransform().Position = GeneratorPosition;
+
+	ExitZone = GameWorld.SpawnActor<ExitZoneActor>();
+	DirectX::XMFLOAT3 ExitZonePosition = { -12.0f, SecondFloorGridMax.y, 16.0f };
+	if (!GameWorld.FindFloor(ExitZonePosition, 0.0f, SecondFloorGridMax.y - SecondFloorGridMin.y, GroundHit)) return false;
+	ExitZonePosition.y = GroundHit.Position.y + 0.05f;
+	ExitZone->GetActorTransform().Position = ExitZonePosition;
+	ExitZone->GetActorTransform().Scale = { 4.0f, 0.1f, 4.0f };
+	ExitZone->SetTriggerHalfSize({ 2.0f, 1.5f, 2.0f });
+	ExitZone->AddComponent<MeshComponent>(&GeneratorModel);
+
+	if (!FirstFloorMonsterNavGrid.Build(GameWorld, FirstFloorMin, FirstFloorMax, 0.5f, MonsterHalfSize)) return false;
+	if (!SecondFloorMonsterNavGrid.Build(GameWorld, SecondFloorGridMin, SecondFloorGridMax, 0.5f, MonsterHalfSize)) return false;
+	SpiderActor->Initialize(&GameWorld, &FirstFloorMonsterNavGrid, &SecondFloorMonsterNavGrid);
 
 	RenderManager.Initialize(GetGraphics());
 	HUD.Initialize(GetGraphics());
@@ -115,7 +112,8 @@ void LightSaverGame::Update(float deltaTime)
 		return;
 	}
 
-	if (LightGenerator != nullptr && LightGenerator->IsRepaired())
+	if (LightGenerator != nullptr && LightGenerator->IsRepaired() &&
+		ExitZone != nullptr && ExitZone->Contains(MainPlayer->GetPlayerPosition()))
 	{
 		CurrentGameState = GameState::GameClear;
 		GetInput().SetMouseLocked(false);
@@ -151,7 +149,7 @@ bool LightSaverGame::Render()
 		return false;
 	}
 
-	if (!RenderManager.Render(GameWorld, MainPlayer->GetCamera()))
+	if (!RenderManager.Render(GameWorld, MainPlayer->GetCamera(), MainPlayer->IsFlashlightOn()))
 	{
 		return false;
 	}

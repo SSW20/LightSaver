@@ -84,17 +84,26 @@ bool World::FindFloor(const DirectX::XMFLOAT3& Position, float RayStart, float R
 	GroundRay.Origin = Position;
 	GroundRay.Origin.y += RayStart;
 	GroundRay.Direction = { 0,-1,0 };
-	float MaxDistance = RayStart + RayEnd;
+	float ClosestDistance = RayStart + RayEnd;
+	bool bHitFloor = false;
 
-	if (!Raycast(GroundRay, MaxDistance, OutHit))
+	// 벽과 문틀의 BoxCollider 윗면을 바닥으로 오인하지 않도록
+	// 실제 지형으로 사용하는 MeshCollider만 검사한다.
+	for (const auto& Actor : Actors)
 	{
-		return false;
+		if (Actor == nullptr) continue;
+
+		MeshColliderComponent* MeshCollider = Actor->FindComponent<MeshColliderComponent>();
+		if (MeshCollider == nullptr) continue;
+
+		RaycastHitResult CandidateHit = {};
+		if (!MeshCollider->Raycast(GroundRay, ClosestDistance, CandidateHit)) continue;
+		if (CandidateHit.Normal.y < 0.85f) continue;
+
+		ClosestDistance = CandidateHit.Distance;
+		OutHit = CandidateHit;
+		bHitFloor = true;
 	}
 
-	if (OutHit.Normal.y < 0.85f)
-	{
-		return false;
-	}
-
-	return true;
+	return bHitFloor;
 }

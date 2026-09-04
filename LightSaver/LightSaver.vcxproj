@@ -140,10 +140,12 @@
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="CollisionTypes.cpp" />
     <ClCompile Include="Component.cpp" />
+	<ClCompile Include="ExitZoneActor.cpp" />
     <ClCompile Include="GameHUD.cpp" />
     <ClCompile Include="GameLoop.cpp" />
     <ClCompile Include="GeneratorActor.cpp" />
     <ClCompile Include="Graphics.cpp" />
+	<ClCompile Include="HospitalLevel.cpp" />
     <ClCompile Include="InputManager.cpp" />
     <ClCompile Include="Interactable.cpp" />
     <ClCompile Include="LightSaverGame.cpp" />
@@ -180,11 +182,13 @@
     <ClInclude Include="Camera.h" />
     <ClInclude Include="CollisionTypes.h" />
     <ClInclude Include="Component.h" />
+	<ClInclude Include="ExitZoneActor.h" />
     <ClInclude Include="GameHUD.h" />
     <ClInclude Include="GameState.h" />
     <ClInclude Include="GameLoop.h" />
     <ClInclude Include="GeneratorActor.h" />
     <ClInclude Include="Graphics.h" />
+	<ClInclude Include="HospitalLevel.h" />
     <ClInclude Include="InputManager.h" />
     <ClInclude Include="Interactable.h" />
     <ClInclude Include="LightSaverGame.h" />

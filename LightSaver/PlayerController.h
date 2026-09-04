@@ -23,6 +23,7 @@ private:
 	void UpdateMovement(float DeltaTime, InputManager& Input, World& GameWorld);
 	void UpdateVerticalMovement(float DeltaTime, InputManager& Input, World& GameWorld);
 	void UpdateInteraction(InputManager& Input, World& GameWorld, float DeltaTime);
+	void UpdateFlashlight(InputManager& Input);
 
 	PlayerActor* ControlledPlayer = nullptr;
 	Camera* MainCamera = nullptr;

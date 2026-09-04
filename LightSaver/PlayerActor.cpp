@@ -31,6 +31,9 @@ void PlayerActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
 	bIsAlive = true;
 	CurrentHealth = MaxHealth;
 	InvincibleTimer = 0.0f;
+	bFlashlightOn = false;
+	FlashlightRemainingTime = 0.0f;
+	FlashlightCooldownTimer = 0.0f;
 	SetPlayerPosition(SpawnPosition);
 }
 
@@ -61,4 +64,42 @@ void PlayerActor::OnUpdate(float DeltaTime)
 		InvincibleTimer -= DeltaTime;
 	}
 	InvincibleTimer = std::max(InvincibleTimer, 0.0f);
+
+	if (bFlashlightOn)
+	{
+		FlashlightRemainingTime -= DeltaTime;
+		if (FlashlightRemainingTime <= 0.0f)
+		{
+			bFlashlightOn = false;
+			FlashlightRemainingTime = 0.0f;
+			FlashlightCooldownTimer = FlashlightCooldown;
+		}
+	}
+	else if (FlashlightCooldownTimer > 0.0f)
+	{
+		FlashlightCooldownTimer -= DeltaTime;
+		FlashlightCooldownTimer = std::max(FlashlightCooldownTimer, 0.0f);
+	}
+}
+
+void PlayerActor::ToggleFlashlight()
+{
+	if (bFlashlightOn)
+	{
+		bFlashlightOn = false;
+		FlashlightRemainingTime = 0.0f;
+		FlashlightCooldownTimer = FlashlightCooldown;
+		return;
+	}
+
+	if (FlashlightCooldownTimer > 0.0f) return;
+
+	bFlashlightOn = true;
+	FlashlightRemainingTime = FlashlightDuration;
+}
+
+float PlayerActor::GetFlashlightCooldownRatio() const
+{
+	if (FlashlightCooldown <= 0.0f) return 0.0f;
+	return FlashlightCooldownTimer / FlashlightCooldown;
 }

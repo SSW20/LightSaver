@@ -8,6 +8,7 @@ Renderer::~Renderer()
 	if (ObjectBuffer != nullptr) ObjectBuffer->Release();
 	if (MaterialBuffer != nullptr) MaterialBuffer->Release();
 	if (LightBuffer != nullptr) LightBuffer->Release();
+	if (FogBuffer != nullptr) FogBuffer->Release();
 	if (CameraBuffer != nullptr) CameraBuffer->Release();
 }
 
@@ -37,7 +38,7 @@ bool Renderer::Initialize(Graphics& InGraphics)
 	return true;
 }
 
-bool Renderer::Render(const World& WorldSet, Camera& MainCamera)
+bool Renderer::Render(const World& WorldSet, Camera& MainCamera, bool bFlashlightOn)
 {
 
 	Graphic->DeviceContext->OMSetRenderTargets(1, &Graphic->RTV, Graphic->DSV);
@@ -48,7 +49,7 @@ bool Renderer::Render(const World& WorldSet, Camera& MainCamera)
 
 	ShaderSet.Bind(Graphic->DeviceContext);
 
-	UpdateBuffers(MainCamera);
+	UpdateBuffers(MainCamera, bFlashlightOn);
 	DrawWorld(WorldSet);
 	return true;
 
@@ -122,15 +123,24 @@ bool Renderer::SetBuffers()
 	result = Graphic->Device->CreateBuffer(&LightDesc, nullptr, &LightBuffer);
 	if (FAILED(result)) return false;
 
+	D3D11_BUFFER_DESC FogDesc = {};
+	FogDesc.ByteWidth = sizeof(FogBufferData);
+	FogDesc.Usage = D3D11_USAGE_DYNAMIC;
+	FogDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	FogDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+	result = Graphic->Device->CreateBuffer(&FogDesc, nullptr, &FogBuffer);
+	if (FAILED(result)) return false;
+
 	ID3D11Buffer* VsBuffers[] = { CameraBuffer, ObjectBuffer };
-	ID3D11Buffer* PsBuffers[] = { LightBuffer, MaterialBuffer };
+	ID3D11Buffer* PsBuffers[] = { LightBuffer, MaterialBuffer, FogBuffer };
 
 	Graphic->DeviceContext->VSSetConstantBuffers(0, 2, VsBuffers);
-	Graphic->DeviceContext->PSSetConstantBuffers(2, 2, PsBuffers);
+	Graphic->DeviceContext->PSSetConstantBuffers(2, 3, PsBuffers);
 	return true;
 }
 
-bool Renderer::UpdateBuffers(Camera& MainCamera)
+bool Renderer::UpdateBuffers(Camera& MainCamera, bool bFlashlightOn)
 {
 	HRESULT result;
 	D3D11_MAPPED_SUBRESOURCE MappedResource = {};
@@ -155,7 +165,19 @@ bool Renderer::UpdateBuffers(Camera& MainCamera)
 	LightData->LightRange = 30.0f;
 	LightData->SpotOuterCos = std::cos(DirectX::XMConvertToRadians(30.0f));
 	LightData->SpotInnerCos = std::cos(DirectX::XMConvertToRadians(7.0f));
-	LightData->Padding = { 0.0f, 0.0f };
+	LightData->LightEnabled = bFlashlightOn ? 1.0f : 0.0f;
+	LightData->Padding = 0.0f;
 	Graphic->DeviceContext->Unmap(LightBuffer, 0);
+
+	result = Graphic->DeviceContext->Map(FogBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &MappedResource);
+	if (FAILED(result)) return false;
+
+	FogBufferData* FogData = static_cast<FogBufferData*>(MappedResource.pData);
+	DirectX::XMStoreFloat3(&FogData->CameraPosition, MainCamera.GetCameraPosition());
+	FogData->FogDensity = 0.12f;
+	FogData->FogColor = { clearColor[0], clearColor[1], clearColor[2] };
+	FogData->Padding = 0.0f;
+	Graphic->DeviceContext->Unmap(FogBuffer, 0);
+
 	return true;
 }

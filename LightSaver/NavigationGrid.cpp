@@ -1,4 +1,5 @@
 #include "NavigationGrid.h"
+#include <algorithm>
 #include <cmath>
 
 bool NavigationGrid::Build(World& GameWorld, const DirectX::XMFLOAT3& InMinBounds, const DirectX::XMFLOAT3& InMaxBounds, float InCellSize, const DirectX::XMFLOAT3& ActorHalfSize)
@@ -62,24 +63,57 @@ bool NavigationGrid::ConvertToCell(const DirectX::XMFLOAT3& WorldPosition, int& 
     return true;
 }
 
-void NavigationGrid::GetWalkableNeighborIndices(int Column, int Row, std::vector<int>& OutNeighborIndices)
+void NavigationGrid::GetWalkableNeighborIndices(int Column, int Row, std::vector<int>& OutNeighborIndices) const
 {
-    float MaxStepHeight = 0.4f;
-    int Neighbor[4][2] = {{  0, -1 },{  1,  0 }, {  0,  1 }, { -1,  0 } };
+    const int NeighborOffsets[8][2] =
+    {
+        {  0, -1 },
+        {  1,  0 },
+        {  0,  1 },
+        { -1,  0 },
+        { -1, -1 },
+        {  1, -1 },
+        {  1,  1 },
+        { -1,  1 }
+    };
+
     OutNeighborIndices.clear();
 
     const NavigationCell* CurrentCell = GetCell(Column, Row);
     if (CurrentCell == nullptr || !CurrentCell->bWalkable) return;
 
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 8; ++i)
     {
-        int NeighborColumn = Column + Neighbor[i][0];
-        int NeighborRow = Row + Neighbor[i][1];
+        const int ColumnOffset = NeighborOffsets[i][0];
+        const int RowOffset = NeighborOffsets[i][1];
+        const int NeighborColumn = Column + ColumnOffset;
+        const int NeighborRow = Row + RowOffset;
 
         const NavigationCell* NeighborCell = GetCell(NeighborColumn, NeighborRow);
         if (NeighborCell == nullptr || !NeighborCell->bWalkable) continue;
-        float HeightDiff = std::abs(CurrentCell->Position.y - NeighborCell->Position.y);
+
+        const float HeightDiff = std::abs(CurrentCell->Position.y - NeighborCell->Position.y);
         if (HeightDiff > MaxStepHeight) continue;
+
+        const bool bDiagonal = ColumnOffset != 0 && RowOffset != 0;
+        if (bDiagonal)
+        {
+            const NavigationCell* ColumnSideCell = GetCell(Column + ColumnOffset, Row);
+            const NavigationCell* RowSideCell = GetCell(Column, Row + RowOffset);
+
+            if (ColumnSideCell == nullptr || RowSideCell == nullptr ||
+                !ColumnSideCell->bWalkable || !RowSideCell->bWalkable)
+            {
+                continue;
+            }
+
+            const float ColumnSideHeightDiff = std::abs(CurrentCell->Position.y - ColumnSideCell->Position.y);
+            const float RowSideHeightDiff = std::abs(CurrentCell->Position.y - RowSideCell->Position.y);
+            if (ColumnSideHeightDiff > MaxStepHeight || RowSideHeightDiff > MaxStepHeight)
+            {
+                continue;
+            }
+        }
 
         OutNeighborIndices.push_back(GetIndex(NeighborColumn, NeighborRow));
     }
@@ -123,7 +157,7 @@ bool NavigationGrid::FindPath(const DirectX::XMFLOAT3& StartWorldPosition, const
 
     NavigationNode& StartNode = SearchNodes[StartIndex];
     StartNode.GCost = 0.0f;
-    StartNode.HCost = float(std::abs(StartColumn - GoalColumn) + std::abs(StartRow - GoalRow));
+    StartNode.HCost = CalculateHeuristic(StartColumn, StartRow, GoalColumn, GoalRow);
     StartNode.bOpen = true;
 
     std::vector<int> OpenList;
@@ -169,12 +203,17 @@ bool NavigationGrid::FindPath(const DirectX::XMFLOAT3& StartWorldPosition, const
         {
             NavigationNode& NeighborNode = SearchNodes[NeighborIndex];
             if (NeighborNode.bClosed) continue;
-            if (CurrentNode.GCost + 1 >= NeighborNode.GCost) continue;
 
-            NeighborNode.GCost = CurrentNode.GCost + 1;
             int NeighborRow = NeighborIndex / ColumnCount;
             int NeighborColumn = NeighborIndex % ColumnCount;
-            NeighborNode.HCost = std::abs(GoalRow - NeighborRow) + std::abs(GoalColumn - NeighborColumn);
+
+            const bool bDiagonal = NeighborColumn != CurrentColumn && NeighborRow != CurrentRow;
+            const float MoveCost = bDiagonal ? std::sqrt(2.0f) : 1.0f;
+            const float NewGCost = CurrentNode.GCost + MoveCost;
+            if (NewGCost >= NeighborNode.GCost) continue;
+
+            NeighborNode.GCost = NewGCost;
+            NeighborNode.HCost = CalculateHeuristic(NeighborColumn, NeighborRow, GoalColumn, GoalRow);
             NeighborNode.ParentIndex = CurrentIndex;
 
             if (!NeighborNode.bOpen)
@@ -208,4 +247,15 @@ bool NavigationGrid::FindPath(const DirectX::XMFLOAT3& StartWorldPosition, const
 int NavigationGrid::GetIndex(int Column, int Row) const
 {
     return Row * ColumnCount + Column;
+}
+
+float NavigationGrid::CalculateHeuristic(int Column, int Row, int GoalColumn, int GoalRow) const
+{
+    const int ColumnDistance = std::abs(GoalColumn - Column);
+    const int RowDistance = std::abs(GoalRow - Row);
+    const int DiagonalSteps = std::min(ColumnDistance, RowDistance);
+    const int StraightSteps = std::max(ColumnDistance, RowDistance) - DiagonalSteps;
+
+    return static_cast<float>(DiagonalSteps) * std::sqrt(2.0f) +
+        static_cast<float>(StraightSteps);
 }

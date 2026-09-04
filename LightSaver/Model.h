@@ -32,7 +32,7 @@ static_assert(sizeof(MaterialBufferData) % 16 == 0);
 class Model
 {
 public:
-	bool Initialize(ID3D11Device* Device, const std::string& FilePath);
+	bool Initialize(ID3D11Device* Device, const std::string& FilePath, const wchar_t* DefaultTexturePath = nullptr);
 	void Draw(ID3D11DeviceContext* DeviceContext, ID3D11Buffer* MaterialBuffer);
 	size_t GetMeshCount() const { return ModelDatas.size(); }
 	const Mesh* GetMesh(size_t Index) const;
