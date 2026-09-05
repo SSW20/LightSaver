@@ -1,8 +1,14 @@
 {
   "name": "lightsaver",
   "version-string": "0.1.0",
+  "builtin-baseline": "d1f2fece60ad5c8271ace08e9836bcc743ebd05b",
   "dependencies": [
-    "assimp"
-  ],
-  "builtin-baseline": "d1f2fece60ad5c8271ace08e9836bcc743ebd05b"
+    "assimp",
+    {
+      "name": "directxtk",
+      "features": [
+        "xaudio2-9"
+      ]
+    }
+  ]
 }
