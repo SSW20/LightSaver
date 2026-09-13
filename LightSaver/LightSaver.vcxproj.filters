@@ -48,9 +48,9 @@
     <ClCompile Include="Component.cpp">
       <Filter>Scene</Filter>
     </ClCompile>
-	<ClCompile Include="ExitZoneActor.cpp">
-	  <Filter>Gameplay</Filter>
-	</ClCompile>
+    <ClCompile Include="ExitZoneActor.cpp">
+      <Filter>Gameplay</Filter>
+    </ClCompile>
     <ClCompile Include="Transform.cpp">
       <Filter>Scene</Filter>
     </ClCompile>
@@ -60,9 +60,9 @@
     <ClCompile Include="Graphics.cpp">
       <Filter>Rendering</Filter>
     </ClCompile>
-	<ClCompile Include="HospitalLevel.cpp">
-	  <Filter>Scene</Filter>
-	</ClCompile>
+    <ClCompile Include="HospitalLevel.cpp">
+      <Filter>Scene</Filter>
+    </ClCompile>
     <ClCompile Include="Renderer.cpp">
       <Filter>Rendering</Filter>
     </ClCompile>
@@ -123,6 +123,12 @@
     <ClCompile Include="GameHUD.cpp">
       <Filter>Rendering</Filter>
     </ClCompile>
+    <ClCompile Include="SkeletalMesh.cpp">
+      <Filter>Rendering\Resources</Filter>
+    </ClCompile>
+    <ClCompile Include="SkeletalModel.cpp">
+      <Filter>Rendering\Resources</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -146,9 +152,9 @@
     <ClInclude Include="Component.h">
       <Filter>Scene</Filter>
     </ClInclude>
-	<ClInclude Include="ExitZoneActor.h">
-	  <Filter>Gameplay</Filter>
-	</ClInclude>
+    <ClInclude Include="ExitZoneActor.h">
+      <Filter>Gameplay</Filter>
+    </ClInclude>
     <ClInclude Include="Transform.h">
       <Filter>Scene</Filter>
     </ClInclude>
@@ -158,9 +164,9 @@
     <ClInclude Include="Graphics.h">
       <Filter>Rendering</Filter>
     </ClInclude>
-	<ClInclude Include="HospitalLevel.h">
-	  <Filter>Scene</Filter>
-	</ClInclude>
+    <ClInclude Include="HospitalLevel.h">
+      <Filter>Scene</Filter>
+    </ClInclude>
     <ClInclude Include="Renderer.h">
       <Filter>Rendering</Filter>
     </ClInclude>
@@ -223,6 +229,12 @@
     </ClInclude>
     <ClInclude Include="GameState.h">
       <Filter>Gameplay</Filter>
+    </ClInclude>
+    <ClInclude Include="SkeletalMesh.h">
+      <Filter>Rendering\Resources</Filter>
+    </ClInclude>
+    <ClInclude Include="SkeletalModel.h">
+      <Filter>Rendering\Resources</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
