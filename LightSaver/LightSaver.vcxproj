@@ -136,6 +136,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Actor.cpp" />
+    <ClCompile Include="AnimationClip.cpp" />
     <ClCompile Include="BoxColliderComponent.cpp" />
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="CollisionTypes.cpp" />
@@ -180,6 +181,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Actor.h" />
+    <ClInclude Include="AnimationClip.h" />
     <ClInclude Include="BoxColliderComponent.h" />
     <ClInclude Include="Camera.h" />
     <ClInclude Include="CollisionTypes.h" />

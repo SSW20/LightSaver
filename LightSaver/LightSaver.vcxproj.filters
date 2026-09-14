@@ -129,6 +129,9 @@
     <ClCompile Include="SkeletalModel.cpp">
       <Filter>Rendering\Resources</Filter>
     </ClCompile>
+    <ClCompile Include="AnimationClip.cpp">
+      <Filter>Rendering</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -235,6 +238,9 @@
     </ClInclude>
     <ClInclude Include="SkeletalModel.h">
       <Filter>Rendering\Resources</Filter>
+    </ClInclude>
+    <ClInclude Include="AnimationClip.h">
+      <Filter>Rendering</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
