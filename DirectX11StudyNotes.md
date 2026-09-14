@@ -11690,3 +11690,743 @@ OBJ의 사각형 면은 Model Loader의 `aiProcess_Triangulate`에 의해 삼각
 ```
 
 이를 위해 다음 단계에서 이동을 막지 않는 `ExitZoneActor` Trigger 영역을 만들 예정이다. 이후 맵의 기능 배치를 확정하고 거리 안개, 3D 방향 사운드, 시작 및 재시작 UI를 연결한다.
+
+# 2026-09-14 - 정적 모델에서 스켈레탈 애니메이션 데이터까지
+
+## 1. 이번 작업의 목표
+
+기존 `Model`, `Mesh` 구조는 OBJ처럼 정점이 움직이지 않는 정적 모델을 그리기 위한 구조였다.
+
+```text
+모델 파일에서 정점 읽기
+    → Vertex Buffer 생성
+    → 같은 정점을 매 프레임 Draw
+    → Actor의 World 행렬로 모델 전체를 이동·회전·확대
+```
+
+이 방식에서는 모델 전체가 하나의 단단한 물체처럼 움직인다. 모델의 팔만 굽히거나 다리만 움직일 수는 없다.
+
+이번에는 리깅된 FBX 모델과 별도의 애니메이션 FBX 파일을 읽을 수 있는 기초 구조를 만들었다.
+
+```text
+SkeletalModel
+    → 보이는 Mesh와 정점
+    → 정점마다 영향을 주는 Bone 번호와 Weight
+    → Bone의 OffsetMatrix
+    → 부모·자식 Node Tree
+
+AnimationClip
+    → 시간별 위치 Key
+    → 시간별 회전 Key
+    → 시간별 크기 Key
+```
+
+아직 실제 애니메이션 재생과 GPU 스키닝은 연결하지 않았다. 현재 단계는 FBX 안에 있는 애니메이션 재료를 우리 엔진 형식으로 해독하여 보관하는 단계다.
+
+## 2. Assimp가 하는 일
+
+Assimp는 FBX, OBJ 등 여러 3D 파일 형식을 읽고 공통 구조인 `aiScene`으로 변환해 주는 모델 Import 라이브러리다.
+
+```text
+FBX 파일의 복잡한 저장 형식
+    ↓ Assimp가 해독
+aiScene
+    ├─ aiMesh
+    ├─ aiMaterial
+    ├─ aiNode 계층
+    ├─ aiBone과 Weight
+    └─ aiAnimation과 aiNodeAnim
+```
+
+Assimp가 Direct3D의 Vertex Buffer나 Constant Buffer를 만들어 주는 것은 아니다. Assimp는 파일을 읽어 CPU 데이터 구조로 보여 줄 뿐이다. 그 데이터를 어떤 C++ 구조로 저장하고 어떻게 GPU에 전달할지는 엔진이 직접 결정해야 한다.
+
+## 3. 정적 모델에서 사용했던 PreTransformVertices
+
+정적 모델 로더에서는 다음 후처리 옵션을 사용했다.
+
+```cpp
+aiProcess_PreTransformVertices
+```
+
+모델 파일은 Mesh와 그 Mesh를 사용하는 Node의 변환을 따로 저장할 수 있다.
+
+```text
+Root Node
+ └─ Body Node: 위치 +5, 회전 30도
+     └─ Mesh의 원래 정점
+```
+
+`PreTransformVertices`는 Node의 위치·회전·크기를 정점에 미리 적용한다.
+
+```text
+원래 정점 × Body Node 변환
+    → 변환이 이미 적용된 새 정점
+```
+
+이것을 흔히 변환을 정점에 "굽는다" 또는 Bake한다고 표현한다. World 좌표로 굽는다는 뜻은 아니다. 모델 안에서 Node들을 조립한 결과를 하나의 Model Local 좌표로 미리 합친다는 뜻이다.
+
+정적 모델은 Node 관계가 실행 중 바뀌지 않으므로 한 번 구워 놓으면 편리하다.
+
+```text
+정적 모델
+Node 변환을 한 번 정점에 적용
+    → 이후 Node Tree가 없어도 같은 모양을 그릴 수 있음
+```
+
+## 4. 애니메이션 모델에서 미리 구우면 안 되는 이유
+
+애니메이션은 시간에 따라 Node와 Bone의 관계가 계속 바뀐다.
+
+```text
+0초: 팔이 아래를 향함
+1초: 팔꿈치가 45도 굽음
+2초: 팔꿈치가 90도 굽음
+```
+
+처음 자세를 정점에 완전히 구운 뒤 Node 구조를 버리면 다음 프레임에 팔꿈치만 다시 회전시킬 기준을 잃는다.
+
+그래서 `SkeletalModel`의 Import Flag에는 `aiProcess_PreTransformVertices`를 넣지 않았다.
+
+```cpp
+const unsigned int ImportFlag =
+    aiProcess_Triangulate |
+    aiProcess_JoinIdenticalVertices |
+    aiProcess_MakeLeftHanded |
+    aiProcess_FlipWindingOrder |
+    aiProcess_FlipUVs |
+    aiProcess_GenSmoothNormals |
+    aiProcess_LimitBoneWeights;
+```
+
+이제 정점은 원래 Bind Pose 위치로 보존하고, 매 프레임 Bone 행렬을 계산해서 정점을 움직일 예정이다.
+
+## 5. Mesh, Bone, Skeleton의 관계
+
+Mesh는 화면에 보이는 피부다. 정점, UV, Normal, Index를 가진다.
+
+Bone은 화면에 직접 그리는 물체가 아니다. 정점을 움직이기 위해 사용하는 보이지 않는 좌표 기준이다.
+
+Skeleton은 Bone과 Node들의 부모·자식 관계 전체다.
+
+```text
+root
+ └─ pelvis
+     └─ spine
+         ├─ left_arm
+         ├─ right_arm
+         └─ head
+```
+
+부모가 움직이면 자식도 함께 움직인다.
+
+```text
+pelvis 이동
+    → spine도 이동
+        → arm과 head도 이동
+```
+
+따라서 팔의 최종 위치는 팔의 Local 변환 하나만으로 구하지 않는다. 부모 변환을 Root까지 차례로 합쳐야 한다.
+
+## 6. SkeletalVertex에 추가한 데이터
+
+정적 `Vertex`에는 다음 데이터가 있었다.
+
+```text
+Position
+UV
+Normal
+```
+
+`SkeletalVertex`에는 다음 데이터가 추가됐다.
+
+```text
+BoneIndices[4]
+BoneWeights[4]
+```
+
+예를 들어 팔꿈치 근처 정점 하나가 다음 영향을 받을 수 있다.
+
+```text
+BoneIndices = [상완 Bone 번호, 하완 Bone 번호, 0, 0]
+BoneWeights = [0.3,          0.7,          0, 0]
+```
+
+이 정점은 상완 움직임을 30%, 하완 움직임을 70% 섞어서 따라간다. 관절 주위가 딱 끊어지지 않고 부드럽게 휘는 이유가 Weight다.
+
+개념적인 최종 정점 계산은 다음과 같다.
+
+```text
+움직인 정점
+= 상완으로 변환한 정점 × 0.3
++  하완으로 변환한 정점 × 0.7
+```
+
+## 7. Bone 영향을 4개로 제한한 이유
+
+이론적으로 정점 하나가 많은 Bone의 영향을 받을 수도 있다. 하지만 모든 정점에 가변 길이 배열을 넣으면 GPU에서 처리하기 불편하고 계산량도 늘어난다.
+
+그래서 일반적인 실시간 스키닝처럼 정점당 최대 4개의 Bone 영향만 저장한다.
+
+```cpp
+UINT BoneIndices[4];
+float BoneWeights[4];
+```
+
+Assimp Import Flag의 다음 옵션도 함께 사용한다.
+
+```cpp
+aiProcess_LimitBoneWeights
+```
+
+이 옵션은 Assimp가 정점당 Bone Weight 개수를 제한하도록 요청한다. 하지만 실제 저장 공간과 빈 슬롯을 찾는 규칙은 `SkeletalVertex::AddBoneInfluence()`에서 우리 엔진이 관리한다.
+
+```text
+Weight가 비어 있는 0번 칸 탐색
+    → BoneIndex와 Weight 저장
+
+0번이 사용 중이면 1번 칸 탐색
+    → 최대 4번 반복
+```
+
+## 8. Assimp의 Bone Weight 형식과 우리 형식의 차이
+
+Assimp의 `aiBone`은 "이 Bone이 어떤 정점들에게 영향을 주는가"라는 방향으로 데이터를 제공한다.
+
+```text
+left_arm Bone
+ ├─ Vertex 10에 Weight 0.8
+ ├─ Vertex 11에 Weight 0.7
+ └─ Vertex 12에 Weight 0.5
+```
+
+반면 GPU Vertex Shader에서는 정점 하나를 처리하면서 그 정점에 영향을 주는 Bone을 바로 알아야 한다.
+
+```text
+Vertex 10
+ ├─ left_arm 0.8
+ └─ spine    0.2
+```
+
+그래서 Import 과정에서 데이터 방향을 바꿔 저장한다.
+
+```cpp
+for (각 SourceBone)
+{
+    for (그 Bone의 각 Weight)
+    {
+        VertexIndex = SourceWeight.mVertexId;
+        Weight = SourceWeight.mWeight;
+
+        SourceVertices[VertexIndex]
+            .AddBoneInfluence(BoneIndex, Weight);
+    }
+}
+```
+
+즉 Assimp가 주는 Bone 중심 목록을 Vertex 중심 목록으로 재배치한 것이다.
+
+## 9. 여러 Mesh에서 Bone 번호를 통일한 이유
+
+Tree Ent 모델은 여러 Mesh로 나뉘어 있지만 같은 Skeleton을 공유한다.
+
+```text
+Mesh 0의 Bone 목록
+    root, pelvis, spine, head ...
+
+Mesh 1의 Bone 목록
+    root, pelvis, spine, left_arm ...
+```
+
+각 Mesh의 `mBones[0]`이 언제나 같은 Bone이라는 보장은 없다.
+
+```text
+Mesh 0의 2번 Bone = spine
+Mesh 1의 2번 Bone = head
+```
+
+Mesh별 번호를 그대로 Vertex에 저장하면 하나의 Bone 행렬 배열로 모든 Mesh를 그릴 수 없다. 따라서 이름을 기준으로 모델 전체에서 공통 번호를 만든다.
+
+```text
+"root"     → 모델 전체 0번
+"pelvis"   → 모델 전체 1번
+"spine"    → 모델 전체 2번
+"left_arm" → 모델 전체 3번
+```
+
+이를 위해 다음 두 컨테이너를 사용한다.
+
+```cpp
+std::vector<BoneInfo> BoneInfos;
+std::unordered_map<std::string, UINT> BoneInfoMap;
+```
+
+역할은 서로 다르다.
+
+```text
+BoneInfoMap
+    Bone 이름으로 번호를 빠르게 검색
+
+BoneInfos
+    번호로 실제 BoneInfo와 OffsetMatrix에 접근
+```
+
+`FindOrCreateBoneIndex()`는 같은 이름이 처음 나오면 새 번호를 만들고, 이미 나온 이름이면 기존 번호를 반환한다.
+
+이 작업은 중복 정점을 합치는 것이 아니다. 여러 Mesh가 같은 Skeleton Bone 행렬을 참조하도록 Bone 번호 체계를 하나로 통일하는 작업이다.
+
+## 10. OffsetMatrix는 무엇인가
+
+정점은 모델의 Bind Pose 좌표로 저장된다. 하지만 특정 Bone을 기준으로 움직이려면 먼저 그 정점이 해당 Bone에서 얼마나 떨어져 있었는지 알아야 한다.
+
+예를 들어 다음과 같다고 하자.
+
+```text
+모델 원점         = 0
+팔꿈치 Bone 위치  = 8
+손 정점 위치      = 10
+```
+
+손은 팔꿈치 기준으로 `10 - 8 = 2`만큼 떨어져 있다. 팔꿈치의 Bind 위치를 제거하는 변환이 OffsetMatrix다.
+
+```text
+손 정점 10 × 팔꿈치 Offset -8
+    → 팔꿈치 Local 위치 2
+```
+
+그다음 현재 프레임의 팔꿈치가 12에 있다면:
+
+```text
+팔꿈치 Local 위치 2 × 현재 팔꿈치 Global 12
+    → 현재 손 위치 14
+```
+
+따라서 개념적인 Bone 변환 순서는 다음과 같다.
+
+```text
+원래 정점
+    × OffsetMatrix
+    × 현재 Bone Global Matrix
+    → 현재 자세의 Model Local 정점
+```
+
+OffsetMatrix는 Bone의 현재 애니메이션 움직임이 아니다. 모델이 처음 만들어졌던 Bind Pose에서 모델 좌표를 Bone Local 좌표로 옮기는 고정 행렬이다.
+
+## 11. SkeletonNode의 LocalTransform은 무엇인가
+
+`SkeletonNode`는 다음 정보를 가진다.
+
+```cpp
+struct SkeletonNode
+{
+    std::string Name;
+    DirectX::XMFLOAT4X4 LocalTransform;
+    std::vector<SkeletonNode> Children;
+};
+```
+
+`LocalTransform`은 해당 Node가 부모를 기준으로 어디에 있는지를 나타낸다.
+
+```text
+shoulder가 몸통에서 +5
+elbow가 shoulder에서 +3
+hand가 elbow에서 +2
+```
+
+손의 모델 내부 최종 위치는 부모 관계를 누적해서 구한다.
+
+```text
+hand Global
+= hand Local + elbow Local + shoulder Local
+= 2 + 3 + 5
+= 10
+```
+
+행렬에서는 단순 덧셈 대신 행렬 곱으로 계산한다.
+
+```text
+Node Global = Node Local × Parent Global
+```
+
+OffsetMatrix만으로는 이 부모·자식 관계를 알 수 없다. OffsetMatrix는 Bind Pose에서 좌표계를 옮기는 용도이고, LocalTransform과 Node Tree는 현재 Global 변환을 부모부터 계산하는 용도다.
+
+## 12. Assimp Node Tree를 복사한 이유
+
+`Assimp::Importer`와 `aiScene`은 `Initialize()`가 끝나면 수명이 종료된다. `aiNode*` 주소를 그대로 저장하면 이후에는 이미 해제된 메모리를 가리키게 된다.
+
+따라서 필요한 Node 정보를 엔진의 `SkeletonNode`로 깊은 복사했다.
+
+```cpp
+void SkeletalModel::CopyNodeTree(
+    const aiNode* SourceNode,
+    SkeletonNode& DestinationNode)
+```
+
+함수는 다음 순서로 동작한다.
+
+```text
+1. 현재 Node 이름 복사
+2. 현재 Node LocalTransform 복사
+3. 자식 배열 준비
+4. 각 자식 Node 생성
+5. 자식마다 같은 함수 재귀 호출
+```
+
+재귀 호출을 사용하면 Root부터 몇 단계의 자식이 있는지 미리 몰라도 전체 계층을 그대로 복사할 수 있다.
+
+## 13. Assimp 행렬을 전치한 이유
+
+Assimp의 `aiMatrix4x4` 메모리를 `XMFLOAT4X4`로 복사한 뒤 다음 전치를 수행했다.
+
+```cpp
+XMMATRIX Matrix = XMLoadFloat4x4(&RowMajorMatrix);
+Matrix = XMMatrixTranspose(Matrix);
+XMStoreFloat4x4(&DestinationNode.LocalTransform, Matrix);
+```
+
+현재 엔진이 사용하는 DirectXMath 행렬 곱 규칙과 Assimp에서 읽은 행렬 배치를 맞추기 위한 변환이다. Node의 LocalTransform과 Bone의 OffsetMatrix 모두 같은 기준으로 변환해야 나중에 서로 곱했을 때 회전축과 이동 위치가 어긋나지 않는다.
+
+## 14. FBX Pivot 보조 Node를 제거한 이유
+
+FBX는 회전 중심점과 보정 변환을 표현하기 위해 이름에 Pivot 성격을 가진 중간 Node들을 많이 만들 수 있다.
+
+```text
+Arm
+ ├─ RotationPivot
+ ├─ RotationOffset
+ └─ 실제 Arm Node
+```
+
+모델 FBX와 별도 애니메이션 FBX가 서로 다른 Pivot 보조 Node 구조로 해석되면 이름으로 채널을 연결하기 어려워진다.
+
+그래서 모델과 애니메이션을 읽을 때 모두 다음 옵션을 사용했다.
+
+```cpp
+Importer.SetPropertyBool(
+    AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS,
+    false);
+```
+
+중요한 점은 `SkeletalModel`과 `AnimationClip`이 같은 Import 기준을 사용해야 한다는 것이다.
+
+## 15. SkeletalModel이 현재 저장하는 전체 구조
+
+현재 `SkeletalModel`은 크게 세 종류의 데이터를 보관한다.
+
+```text
+SkeletalModel
+├─ SkeletalModelDatas
+│   ├─ SkeletalMesh 0
+│   ├─ SkeletalMesh 1
+│   └─ 각 Mesh의 MaterialIndex
+│
+├─ BoneInfos / BoneInfoMap
+│   ├─ 모델 전체 Bone 번호
+│   └─ 각 Bone의 OffsetMatrix
+│
+└─ RootNode
+    └─ 전체 Node 부모·자식 Tree
+```
+
+이 가운데 `SkeletalMesh`는 GPU Vertex/Index Buffer를 만들 수 있는 상태다. Material과 Texture 연결, 실제 Skeletal Shader Draw는 후속 작업이다.
+
+## 16. 애니메이션 FBX가 제공하는 데이터
+
+애니메이션 FBX가 매 프레임 모든 Bone의 완성된 Global Matrix를 직접 제공하는 것은 아니다. 일반적으로 Bone 또는 Node 이름별로 시간에 따른 Local SRT Key를 제공한다.
+
+```text
+pelvis 채널
+ ├─ Position Keys
+ ├─ Rotation Keys
+ └─ Scaling Keys
+
+left_arm 채널
+ ├─ Position Keys
+ ├─ Rotation Keys
+ └─ Scaling Keys
+```
+
+Assimp에서는 한 Node의 애니메이션을 `aiNodeAnim`으로 제공한다.
+
+```cpp
+aiNodeAnim* SourceChannel =
+    SourceAnimation->mChannels[i];
+```
+
+여기서 Channel은 "이름이 같은 Node를 시간에 따라 어떻게 움직일 것인가"를 나타내는 움직임 명세서다.
+
+## 17. AnimationClip의 구조
+
+애니메이션 Key는 값과 그 값이 적용되는 Tick을 함께 저장한다.
+
+```cpp
+struct AnimationVectorKey
+{
+    XMFLOAT3 Value;
+    float Tick;
+};
+```
+
+위치와 크기는 3차원 벡터를 사용한다. 회전은 Quaternion을 사용하므로 네 값이 필요하다.
+
+```cpp
+struct AnimationQuaternionKey
+{
+    XMFLOAT4 Value; // x, y, z, w
+    float Tick;
+};
+```
+
+Node 하나의 세 가지 Key 목록을 `AnimationChannel`에 묶었다.
+
+```cpp
+struct AnimationChannel
+{
+    std::string NodeName;
+    std::vector<AnimationVectorKey> PositionKeys;
+    std::vector<AnimationQuaternionKey> RotationKeys;
+    std::vector<AnimationVectorKey> ScalingKeys;
+};
+```
+
+`AnimationClip`은 파일 하나의 모든 Channel을 이름으로 보관한다.
+
+```cpp
+std::unordered_map<std::string, AnimationChannel> Channels;
+```
+
+나중에 Skeleton Node를 순회하며 Node 이름과 같은 Channel을 빠르게 찾기 위해 `unordered_map`을 사용했다.
+
+## 18. Tick과 초의 차이
+
+애니메이션 Key의 시간은 초가 아니라 Tick으로 저장될 수 있다.
+
+```text
+DurationTicks = 애니메이션의 전체 Tick 길이
+TicksPerSecond = 1초 동안 진행되는 Tick 수
+```
+
+예를 들어 다음 애니메이션이 있다고 하자.
+
+```text
+DurationTicks = 60
+TicksPerSecond = 30
+```
+
+실제 재생 시간은 다음과 같다.
+
+```text
+60 Tick ÷ 30 Tick/초 = 2초
+```
+
+게임의 `DeltaTime`은 초 단위이므로 Animator에서는 다음처럼 현재 Tick을 진행하게 된다.
+
+```cpp
+CurrentTick += DeltaTime * TicksPerSecond;
+```
+
+현재 `AnimationClip`은 `DurationTicks`와 `TicksPerSecond`까지만 저장한다. 시간을 실제로 진행시키는 책임은 다음에 만들 `Animator`가 가진다.
+
+## 19. AnimationClip::Initialize의 실제 흐름
+
+애니메이션 파일 로딩은 다음 순서로 진행된다.
+
+```text
+1. 이전 Channels 제거
+2. Assimp로 애니메이션 FBX 읽기
+3. Scene에 Animation이 있는지 검사
+4. 첫 번째 aiAnimation 선택
+5. 이름, 전체 Tick, 초당 Tick 저장
+6. 모든 aiNodeAnim Channel 순회
+7. Position/Rotation/Scaling Key 복사
+8. Node 이름을 Key로 Channels에 저장
+```
+
+Position Key 복사 예시는 다음과 같다.
+
+```cpp
+AnimChannel.PositionKeys[j].Tick =
+    SourceChannel->mPositionKeys[j].mTime;
+
+AnimChannel.PositionKeys[j].Value = XMFLOAT3(
+    SourceChannel->mPositionKeys[j].mValue.x,
+    SourceChannel->mPositionKeys[j].mValue.y,
+    SourceChannel->mPositionKeys[j].mValue.z);
+```
+
+Rotation은 Quaternion의 네 성분을 복사한다.
+
+```cpp
+XMFLOAT4(x, y, z, w)
+```
+
+파일 이름의 확장자를 제거한 부분은 Clip 이름으로 저장한다.
+
+```text
+Animations/Idle1.fbx
+    → Name = "Idle1"
+```
+
+## 20. 모델 데이터와 애니메이션 데이터가 만나는 과정
+
+`SkeletalModel`과 `AnimationClip`은 서로 다른 질문에 답한다.
+
+```text
+SkeletalModel
+    어떤 정점이 어떤 Bone의 영향을 받는가?
+    Bone의 Bind Pose Offset은 무엇인가?
+    Bone과 Node의 부모·자식 관계는 무엇인가?
+
+AnimationClip
+    특정 시간에 각 Node의 위치·회전·크기는 무엇인가?
+```
+
+나중에 Animator는 다음 흐름으로 둘을 합친다.
+
+```text
+Skeleton Root부터 Node 순회
+    ↓
+Node 이름으로 AnimationChannel 검색
+    ↓
+현재 Tick 앞뒤 Key를 찾음
+    ↓
+Position, Rotation, Scale 보간
+    ↓
+현재 Node Local Matrix 생성
+    ↓
+부모 Global Matrix와 곱함
+    ↓
+Node 이름으로 모델 전체 BoneIndex 검색
+    ↓
+OffsetMatrix와 현재 Global Matrix 결합
+    ↓
+FinalBoneMatrices[BoneIndex]에 저장
+```
+
+그 후 Vertex Shader가 각 정점의 `BoneIndices[4]`와 `BoneWeights[4]`를 사용해 네 Bone 결과를 섞는다.
+
+## 21. World 변환과 스키닝 변환의 순서
+
+스키닝은 Actor를 World에 배치하기 전, 모델 내부에서 자세를 만드는 과정이다.
+
+```text
+원래 Mesh 정점
+    ↓ Bone 스키닝
+애니메이션이 적용된 Model Local 정점
+    ↓ Actor World Matrix
+World 좌표
+    ↓ View Matrix
+View 좌표
+    ↓ Projection Matrix
+Clip 좌표
+```
+
+즉 Bone 행렬은 World Matrix를 대체하지 않는다.
+
+```text
+Bone Matrix
+    모델 내부에서 팔·다리·몸통 자세를 만듦
+
+World Matrix
+    완성된 모델 전체를 게임 월드에 배치함
+```
+
+몬스터가 걷는 애니메이션을 하면서 월드에서 플레이어를 향해 이동하려면 두 변환이 모두 필요하다.
+
+## 22. 현재 추가한 검색 함수의 목적
+
+Animator가 내부 컨테이너를 직접 만지지 않도록 조회 함수를 추가했다.
+
+```cpp
+const SkeletonNode& GetRootNode() const;
+size_t GetBoneCount() const;
+bool FindBoneIndex(
+    const std::string& BoneName,
+    UINT& OutBoneIndex);
+const BoneInfo* GetBoneInfo(UINT BoneIndex) const;
+```
+
+`AnimationClip`에는 Node 이름으로 Channel을 찾는 함수를 추가했다.
+
+```cpp
+const AnimationChannel* FindChannel(
+    const std::string& NodeName) const;
+```
+
+이 함수들이 필요한 이유는 Animator의 탐색 방향이 이름 중심이기 때문이다.
+
+```text
+현재 SkeletonNode.Name
+    → 같은 이름의 AnimationChannel
+    → 같은 이름의 BoneIndex
+    → 해당 BoneInfo.OffsetMatrix
+```
+
+## 23. 현재 구현이 전제로 두는 것과 후속 안전성 작업
+
+현재 `FindChannel()`은 해당 이름이 반드시 존재한다고 가정하고 `find()` 결과를 바로 역참조한다. `GetBoneInfo()`도 유효한 BoneIndex가 전달된다고 가정한다.
+
+Tree Ent 모델과 선택한 Animation Clip의 이름이 모두 일치하는 정상 경로에서는 사용할 수 있지만, 다른 FBX를 읽거나 일부 Channel이 빠진 Clip을 사용하면 검사 코드가 필요하다.
+
+```text
+find() == end()
+    → nullptr 반환
+
+BoneIndex >= BoneInfos.size()
+    → nullptr 반환
+```
+
+또한 Assimp의 애니메이션 시간은 `double`인데 현재 엔진 Key 시간은 `float`이므로 빌드 경고가 발생한다. 실시간 게임 애니메이션 범위에서는 보통 float 정밀도로 충분하지만 의도적인 변환임을 표시하려면 `static_cast<float>()`로 정리할 수 있다.
+
+이 항목들은 현재 빌드를 막지는 않으며 Animator 연결 전에 보강할 수 있다.
+
+## 24. 이번 단계에서 실제로 추가된 파일과 책임
+
+```text
+SkeletalMesh.h/.cpp
+    BoneIndices와 BoneWeights가 포함된 정점
+    Skeletal Vertex/Index Buffer 생성과 Bind
+
+SkeletalModel.h/.cpp
+    FBX Mesh 읽기
+    모델 전체 Bone 번호 통일
+    Weight와 OffsetMatrix 저장
+    Skeleton Node Tree 복사
+
+AnimationClip.h/.cpp
+    별도 애니메이션 FBX 읽기
+    Node별 Position/Rotation/Scaling Key 저장
+
+LightSaver.vcxproj / .filters
+    새 C++ 파일을 Visual Studio 빌드와 필터에 등록
+```
+
+## 25. 현재 완료 범위와 다음 단계
+
+현재까지 완료된 범위는 다음과 같다.
+
+```text
+[완료] SkeletalVertex 형식
+[완료] 정점당 최대 4개 Bone 영향 저장
+[완료] 여러 Mesh의 Bone 번호 통일
+[완료] OffsetMatrix 저장
+[완료] Skeleton Node Tree 복사
+[완료] 별도 Animation FBX의 SRT Key 저장
+[완료] 모델과 Clip의 조회 함수 기초
+
+[다음] Animator 생성
+[다음] DeltaTime을 CurrentTick으로 변환
+[다음] 앞뒤 Key 사이 보간
+[다음] Node Local과 부모 Global 누적
+[다음] FinalBoneMatrices 계산
+[다음] Bone Constant Buffer와 Skeletal Shader
+[다음] 실제 Tree Ent Mesh Draw 및 Texture 연결
+[다음] Idle/Walk/Attack 등 상태별 Clip 전환
+```
+
+이번 단계의 핵심은 아직 화면에서 모델을 움직이는 것이 아니라, 애니메이션을 계산하는 데 필요한 정적 정보와 시간 정보를 서로 분리해서 올바르게 저장한 것이다.
+
+```text
+SkeletalModel = 몸, 피부, 뼈대와 Bind Pose 정보
+AnimationClip = 시간에 따른 움직임 명세서
+Animator      = 둘을 현재 시간에 맞게 계산할 실행기
+```
