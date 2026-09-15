@@ -12430,3 +12430,279 @@ SkeletalModel = 몸, 피부, 뼈대와 Bind Pose 정보
 AnimationClip = 시간에 따른 움직임 명세서
 Animator      = 둘을 현재 시간에 맞게 계산할 실행기
 ```
+
+# Skeletal Animation 실행과 Renderer 연결
+
+## 26. 이번 단계의 목표
+
+이전 단계에서는 FBX에서 애니메이션 계산에 필요한 데이터를 읽어 저장했다. 이번 단계에서는 저장한 데이터를 매 프레임 계산하고 GPU로 보내 실제로 그리는 흐름을 연결했다.
+
+```text
+SkeletalModel
+    몸, 정점, Bone, Weight, OffsetMatrix, Node Tree
+
+AnimationClip
+    시간별 Node Position, Rotation, Scale
+
+Animator
+    현재 시간의 Bone 최종 행렬 계산
+
+SkeletalMeshComponent
+    Actor와 Animator, Renderer 사이를 연결
+
+Renderer
+    World 행렬과 Bone 행렬을 GPU로 전달
+
+AnimShader
+    정점마다 Bone 행렬과 Weight를 적용해 스키닝
+```
+
+## 27. Animator가 하는 일
+
+`Animator`는 모델이나 애니메이션 파일을 소유하지 않는다. 사용할 `SkeletalModel`과 현재 재생할 `AnimationClip`의 주소를 가지고, 몬스터 한 마리의 재생 상태를 관리한다.
+
+```text
+Animator
+├─ SKModel            어떤 몸과 Skeleton을 사용하는가
+├─ AnimClip           어떤 동작을 재생하는가
+├─ CurrentTick        현재 애니메이션 시간
+├─ bLoop              반복할 것인가
+└─ FinalBoneMatrices  현재 프레임의 Bone 최종 행렬
+```
+
+같은 모델과 Clip을 여러 몬스터가 공유하더라도 Animator는 몬스터마다 따로 필요하다.
+
+```text
+Monster A Animator: Walk 10틱
+Monster B Animator: Walk 23틱
+```
+
+## 28. 초를 Animation Tick으로 바꾸는 과정
+
+게임의 `DeltaTime`은 초 단위이고 FBX 애니메이션 Key는 Tick 단위다.
+
+```cpp
+CurrentTick += DeltaTime * TicksPerSecond;
+```
+
+예를 들어 초당 30틱인 애니메이션에서 `DeltaTime`이 0.1초라면 3틱 진행한다.
+
+반복 재생에서는 재생 시간이 Duration을 넘었을 때 나머지를 사용한다.
+
+```cpp
+CurrentTick = std::fmod(CurrentTick, Duration);
+```
+
+## 29. Key 보간
+
+FBX는 모든 순간의 값을 저장하지 않고 몇 개의 Key만 저장한다.
+
+```text
+0틱  위치 A
+10틱 위치 B
+```
+
+현재 시간이 4틱이면 두 Key 사이의 비율을 계산한다.
+
+```text
+(4 - 0) / (10 - 0) = 0.4
+```
+
+Position과 Scale은 `XMVectorLerp`, Rotation Quaternion은 `XMQuaternionSlerp`로 보간한다. Rotation에 일반 선형 보간을 사용하면 회전 속도와 방향이 부자연스러울 수 있기 때문이다.
+
+## 30. Node Local에서 Final Bone Matrix까지
+
+각 Node는 자신의 애니메이션 채널이 있으면 현재 시간의 SRT로 Local 행렬을 만든다.
+
+```text
+AnimatedLocal = Scale × Rotation × Translation
+```
+
+채널이 없다면 모델 FBX에서 복사한 기본 `LocalTransform`을 사용한다. 그다음 부모부터 자식까지 재귀 순회하며 Global 행렬을 누적한다.
+
+```text
+NodeGlobal = NodeLocal × ParentGlobal
+```
+
+현재 Node가 정점에 실제로 영향을 주는 Bone이면 OffsetMatrix를 합쳐 최종 행렬을 저장한다.
+
+```text
+FinalBoneMatrix = OffsetMatrix × NodeGlobal
+```
+
+Node Tree에는 정점에 영향을 주지 않는 보조 Node도 있으므로 모든 Node를 순회하되, `BoneInfoMap`에서 이름을 찾은 Node만 `FinalBoneMatrices`에 기록한다.
+
+## 31. SkeletalMeshComponent의 책임
+
+기존 `MeshComponent`는 정적 `Model`과 Actor의 World Transform을 Renderer에 전달했다.
+
+```text
+MeshComponent
+→ Model + World Transform
+```
+
+애니메이션 모델은 현재 Bone 자세가 하나 더 필요하다.
+
+```text
+SkeletalMeshComponent
+→ SkeletalModel + Animator + World Transform
+```
+
+`SkeletalModel`은 여러 Actor가 공유할 수 있으므로 포인터로 가지고, 재생 시간과 현재 자세는 인스턴스마다 달라야 하므로 `Animator`는 컴포넌트가 직접 가진다.
+
+컴포넌트의 `Update()`는 Animator를 갱신하고, `CollectRenderObjects()`는 Renderer가 읽을 임시 요청서를 만든다.
+
+## 32. RenderObject 확장
+
+`RenderObject`는 리소스를 소유하지 않는 한 프레임용 그리기 요청서다.
+
+```text
+정적 요청
+├─ ModelSet
+└─ ModelWorldTransform
+
+스켈레탈 요청
+├─ SkeletalModelSet
+├─ AnimatorSet
+└─ ModelWorldTransform
+```
+
+`World`는 모든 Actor의 요청서를 모으고 Renderer는 각 요청서의 종류를 보고 알맞은 Draw 함수를 선택한다.
+
+## 33. Renderer의 정적 모델과 스켈레탈 모델 분기
+
+정적 모델은 World 행렬만 갱신하면 되지만 스켈레탈 모델은 Shader와 Bone Buffer가 추가로 필요하다.
+
+```text
+DrawModel
+├─ 일반 Shader 선택
+├─ World Buffer 갱신
+└─ Model.Draw
+
+DrawSkeletalModel
+├─ SkeletalShader 선택
+├─ World Buffer 갱신
+├─ Bone Buffer 갱신
+└─ SkeletalModel.Draw
+```
+
+Direct3D 상태는 다음 Draw에도 남기 때문에, 스켈레탈 모델 다음에 정적 모델을 그릴 때 `DrawModel()`이 일반 Shader를 다시 Bind해야 한다.
+
+## 34. Bone Constant Buffer
+
+CPU의 `FinalBoneMatrices`를 Vertex Shader에 보내기 위해 최대 128개의 행렬을 가진 Constant Buffer를 추가했다.
+
+```cpp
+struct alignas(16) BoneBufferData
+{
+    DirectX::XMFLOAT4X4 BoneMatrices[128];
+};
+```
+
+현재 HLSL의 Bone Buffer는 `b5` 슬롯을 사용한다.
+
+```hlsl
+cbuffer BoneBuffer : register(b5)
+{
+    matrix BoneMatrices[128];
+}
+```
+
+CPU에서 사용하는 행렬 배치와 HLSL이 기대하는 배치를 맞추기 위해 GPU에 복사할 때 Transpose한다.
+
+## 35. Vertex Shader의 스키닝
+
+`SkeletalVertex`는 일반 정점 정보 외에 자신에게 영향을 주는 Bone 번호와 Weight를 최대 4개 가진다.
+
+```text
+Position
+UV
+Normal
+BoneIndices[4]
+BoneWeights[4]
+```
+
+Vertex Shader는 Weight 합을 1로 정규화한 다음 네 Bone 행렬을 가중합한다.
+
+```text
+SkinMatrix =
+    BoneMatrix[index0] × weight0 +
+    BoneMatrix[index1] × weight1 +
+    BoneMatrix[index2] × weight2 +
+    BoneMatrix[index3] × weight3
+```
+
+변환 순서는 다음과 같다.
+
+```text
+원본 정점
+→ SkinMatrix로 현재 자세의 Model Local 정점
+→ Actor World 행렬로 월드 좌표
+→ View
+→ Projection
+→ 화면
+```
+
+Bone 애니메이션은 몸 내부의 자세를 만들고 Actor의 World Transform은 완성된 몸 전체를 맵 위에서 이동시킨다.
+
+## 36. SkeletalModel Draw
+
+Tree Ent는 하나의 FBX 안에 SkeletalMesh가 5개 있다. `SkeletalModel::Draw()`는 내부 Mesh들을 순회하며 각 Vertex/Index Buffer를 Bind하고 `DrawIndexed()`를 호출한다.
+
+현재 SkeletalModel의 Material과 Texture 로딩은 아직 연결하지 않았다. 따라서 이번 단계는 Bone에 의해 정점이 움직이고 화면에 출력되는지 먼저 확인하는 범위다.
+
+## 37. Tree Ent 실행 연결
+
+프로젝트 안에 실행에 필요한 파일을 복사했다.
+
+```text
+Assets/Models/TreeEnt
+├─ TreeEntAsh.fbx
+└─ Animations
+   ├─ Idle1.fbx
+   └─ Walk.fbx
+```
+
+`LightSaverGame`은 모델과 두 Clip을 한 번 로드한다. 기존 정적 `SpiderModel + MeshComponent` 대신 Tree Ent용 `SkeletalMeshComponent`를 몬스터에 붙이고 현재는 Idle을 반복 재생한다.
+
+## 38. 애니메이션 전용 FBX와 INCOMPLETE 플래그
+
+Tree Ent 모델 FBX에는 Mesh가 5개 있고 애니메이션 파일에는 Mesh 없이 Animation 하나만 있다.
+
+```text
+TreeEntAsh.fbx: Mesh 5, Animation 0
+Idle1.fbx:      Mesh 0, Animation 1
+Walk.fbx:       Mesh 0, Animation 1
+```
+
+Assimp는 Mesh가 없는 애니메이션 전용 FBX에 `AI_SCENE_FLAGS_INCOMPLETE`를 설정할 수 있다. 하지만 `AnimationClip` 로더에는 Mesh가 필요 없으므로 이 플래그만으로 실패시키면 안 된다.
+
+```cpp
+if (Scene == nullptr || Scene->mNumAnimations == 0)
+{
+    return false;
+}
+```
+
+창이 잠시 흰색으로 보인 뒤 종료됐던 이유는 Windows 창과 Direct3D 생성 후 `AnimationClip::Initialize()`가 false를 반환해 게임 루프에 진입하지 못했기 때문이다.
+
+## 39. 현재 완료 범위와 다음 작업
+
+```text
+[완료] Animator 시간 진행과 반복
+[완료] Position, Rotation, Scale 보간
+[완료] Node Tree 재귀 순회
+[완료] FinalBoneMatrices 계산
+[완료] Bone Constant Buffer와 AnimShader
+[완료] SkeletalMeshComponent와 RenderObject 연결
+[완료] Renderer의 정적/스켈레탈 Draw 분기
+[완료] Tree Ent 모델과 Idle/Walk Clip 로드
+[완료] 기존 Spider 표시를 Tree Ent로 교체
+
+[다음] Animator Pause
+[다음] Idle, Chase, Frozen, Attack 상태와 Clip 연결
+[다음] Attack Clip 로드
+[다음] 두 번째 몬스터와 반대 Light 반응
+[다음] SkeletalModel Material과 Texture 연결
+[다음] Scale, 방향, Collider 최종 조정
+```

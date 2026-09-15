@@ -100,7 +100,25 @@ bool SkeletalModel::FindBoneIndex(const std::string& BoneName, UINT& OutBoneInde
 	return true;
 }
 
-void SkeletalModel::CopyNodeTree(const aiNode* SourceNode, SkeletonNode& DestinationNode)
+void SkeletalModel::Draw(ID3D11DeviceContext* DeviceContext)
+{
+	if (DeviceContext == nullptr)
+	{
+		return;
+	}
+
+	for (const auto& ModelData : SkeletalModelDatas)
+	{
+		if (ModelData.MeshData == nullptr)
+		{
+			continue;
+		}
+		ModelData.MeshData->Bind(DeviceContext);
+		DeviceContext->DrawIndexed(ModelData.MeshData->GetIndexCount(),0,0);
+	}
+}
+
+void SkeletalModel::CopyNodeTree(const aiNode* SourceNode, SkeletalNode& DestinationNode)
 {
 	DestinationNode.Name = SourceNode->mName.C_Str();
 	DirectX::XMFLOAT4X4 RowMajorMatrix;
@@ -115,7 +133,7 @@ void SkeletalModel::CopyNodeTree(const aiNode* SourceNode, SkeletonNode& Destina
 
 	for (UINT i = 0; i < SourceNode->mNumChildren; ++i)
 	{
-		SkeletonNode ChildNode;
+		SkeletalNode ChildNode;
 		DestinationNode.Children.push_back(ChildNode);
 		CopyNodeTree(SourceNode->mChildren[i], DestinationNode.Children.back());
 	}

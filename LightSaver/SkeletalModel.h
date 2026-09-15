@@ -16,11 +16,11 @@ struct SkeletalModelData
     UINT MaterialIndex = 0;
 };
 
-struct SkeletonNode
+struct SkeletalNode
 {
     std::string Name;
     DirectX::XMFLOAT4X4 LocalTransform = {};
-    std::vector<SkeletonNode> Children;
+    std::vector<SkeletalNode> Children;
 };
 
 struct BoneInfo
@@ -33,17 +33,18 @@ class SkeletalModel
 {
 public:
     bool Initialize(ID3D11Device* Device, const std::string& FilePath);
-    const SkeletonNode& GetRootNode() const { return RootNode; }
+    const SkeletalNode& GetRootNode() const { return RootNode; }
     size_t GetBoneCount() const{return BoneInfos.size(); }
     bool FindBoneIndex(const std::string& BoneName, UINT& OutBoneIndex);
     const BoneInfo* GetBoneInfo(UINT BoneIndex) const { return &BoneInfos[BoneIndex]; }
+    void Draw(ID3D11DeviceContext* DeviceContext);
 private:
-    void CopyNodeTree(const aiNode* SourceNode, SkeletonNode& DestinationNode);
+    void CopyNodeTree(const aiNode* SourceNode, SkeletalNode& DestinationNode);
     std::unique_ptr<SkeletalMesh> ProcessMesh(ID3D11Device* Device, aiMesh* SourceMesh);
     UINT FindOrCreateBoneIndex(const std::string& BoneName);
     std::vector<BoneInfo> BoneInfos;
     std::unordered_map<std::string, UINT> BoneInfoMap;
 
-    SkeletonNode RootNode;
+    SkeletalNode RootNode;
     std::vector<SkeletalModelData> SkeletalModelDatas;
 };

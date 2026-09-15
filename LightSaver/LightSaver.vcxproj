@@ -137,6 +137,7 @@
   <ItemGroup>
     <ClCompile Include="Actor.cpp" />
     <ClCompile Include="AnimationClip.cpp" />
+    <ClCompile Include="Animator.cpp" />
     <ClCompile Include="BoxColliderComponent.cpp" />
     <ClCompile Include="Camera.cpp" />
     <ClCompile Include="CollisionTypes.cpp" />
@@ -163,6 +164,7 @@
     <ClCompile Include="RenderObject.cpp" />
     <ClCompile Include="Shader.cpp" />
     <ClCompile Include="SkeletalMesh.cpp" />
+    <ClCompile Include="SkeletalMeshComponent.cpp" />
     <ClCompile Include="SkeletalModel.cpp" />
     <ClCompile Include="Texture.cpp" />
     <ClCompile Include="Timer.cpp" />
@@ -172,6 +174,9 @@
     <ClCompile Include="World.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <FxCompile Include="AnimShader.hlsl">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+    </FxCompile>
     <FxCompile Include="shader.hlsl">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
     </FxCompile>
@@ -182,6 +187,7 @@
   <ItemGroup>
     <ClInclude Include="Actor.h" />
     <ClInclude Include="AnimationClip.h" />
+    <ClInclude Include="Animator.h" />
     <ClInclude Include="BoxColliderComponent.h" />
     <ClInclude Include="Camera.h" />
     <ClInclude Include="CollisionTypes.h" />
@@ -209,6 +215,7 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="Shader.h" />
     <ClInclude Include="SkeletalMesh.h" />
+    <ClInclude Include="SkeletalMeshComponent.h" />
     <ClInclude Include="SkeletalModel.h" />
     <ClInclude Include="Texture.h" />
     <ClInclude Include="Timer.h" />

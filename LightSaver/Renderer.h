@@ -6,7 +6,8 @@
 #include <cmath>
 #include "Shader.h"
 class Graphics;
-
+class Animator;
+class SkeletalModel;
 struct alignas(16) ObjectBufferData
 {
 	DirectX::XMFLOAT4X4 World;
@@ -42,10 +43,16 @@ struct alignas(16) FogBufferData
 	float Padding;
 };
 
+struct alignas(16) BoneBufferData
+{
+	DirectX::XMFLOAT4X4 BoneMatrices[128];
+};
+
 static_assert(sizeof(CameraBufferData) % 16 == 0);
 static_assert(sizeof(ObjectBufferData) % 16 == 0);
 static_assert(sizeof(LightBufferData) % 16 == 0);
 static_assert(sizeof(FogBufferData) % 16 == 0);
+static_assert(sizeof(BoneBufferData) % 16 == 0);
 
 class Renderer
 {
@@ -57,6 +64,7 @@ public:
 		
 	bool Initialize(Graphics& InGraphics);
 	bool Render(const World& WorldSet, Camera& MainCamera, bool bFlashlightOn);
+	bool UpdateBoneBuffer(const Animator& AnimatorSet);
 private:
 	Graphics* Graphic = nullptr;
 	ID3D11Buffer* ObjectBuffer = nullptr;
@@ -64,14 +72,17 @@ private:
 	ID3D11Buffer* LightBuffer = nullptr;
 	ID3D11Buffer* FogBuffer = nullptr;
 	ID3D11Buffer* CameraBuffer = nullptr;
+	ID3D11Buffer* BoneBuffer = nullptr;
 	D3D11_VIEWPORT ViewPort = {};
 	float clearColor[4] = { 0.1f, 0.2f, 0.3f, 1.0f };
 	Shader ShaderSet;
+	Shader SkeletalShader;
 
 	bool SetBuffers();
 	bool UpdateBuffers(Camera& MainCamera, bool bFlashlightOn);
 	bool DrawWorld(const World& WorldSet);
 	bool DrawModel(Model& ModelSet, const DirectX::XMMATRIX& World);
+	bool DrawSkeletalModel(SkeletalModel& ModelSet, const Animator& AnimatorSet, const DirectX::XMMATRIX& World);
 
 };
 

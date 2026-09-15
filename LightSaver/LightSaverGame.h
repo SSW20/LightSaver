@@ -17,6 +17,8 @@
 #include "GameHUD.h"
 #include "GameState.h"
 #include "HospitalLevel.h"
+#include "SkeletalModel.h"
+#include "AnimationClip.h"
 
 class Actor;
 class MeshComponent;
@@ -36,8 +38,10 @@ private:
 
 	PlayerController MainPlayerController;
 	PlayerActor* MainPlayer = nullptr;
-	Model SpiderModel; 
 	Model GeneratorModel;
+	SkeletalModel TreeEntModel;
+	AnimationClip TreeEntIdleAnimation;
+	AnimationClip TreeEntWalkAnimation;
 	HospitalLevel Hospital;
 	World GameWorld;
 	MonsterActor* SpiderActor = nullptr;

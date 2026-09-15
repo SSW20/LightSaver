@@ -7,8 +7,7 @@ class MeshComponent : public Component
 {
 public:
 	MeshComponent(Actor* Owner, Model* NewModel)
-		:Component(Owner), ModelSet(NewModel) {
-	};
+		:Component(Owner), ModelSet(NewModel) {};
 
 	void SetModel(Model* NewModel)
 	{

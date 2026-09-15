@@ -9,10 +9,17 @@
 #include "MeshColliderComponent.h"
 #include "GeneratorActor.h"
 #include "ExitZoneActor.h"
+#include "SkeletalMeshComponent.h"
 
 bool LightSaverGame::OnInitialize()
 {
-	if (!SpiderModel.Initialize(GetGraphics().Device, "Assets/Models/Spider/spider.obj")) return false;
+	// Tree Ent의 몸과 Skeleton 정보를 읽는다.
+	if (!TreeEntModel.Initialize(GetGraphics().Device, "Assets/Models/TreeEnt/TreeEntAsh.fbx")) return false;
+
+	// 같은 Skeleton을 사용하는 애니메이션 동작들을 읽는다.
+	if (!TreeEntIdleAnimation.Initialize("Assets/Models/TreeEnt/Animations/Idle1.fbx")) return false;
+	if (!TreeEntWalkAnimation.Initialize("Assets/Models/TreeEnt/Animations/Walk.fbx")) return false;
+
 	if (!GeneratorModel.Initialize(GetGraphics().Device, "Assets/Models/GeneratorBox.obj")) return false;
 	if (!Hospital.Initialize(GetGraphics().Device, GameWorld)) return false;
 
@@ -21,7 +28,8 @@ bool LightSaverGame::OnInitialize()
 
 	SpiderActor = GameWorld.SpawnActor<MonsterActor>();
 	SpiderActor->GetActorTransform().Scale = { 0.01f, 0.01f, 0.01f };
-	SpiderActor->AddComponent<MeshComponent>(&SpiderModel);
+	SkeletalMeshComponent* TreeEntMesh = SpiderActor->AddComponent<SkeletalMeshComponent>(&TreeEntModel);
+	TreeEntMesh->Play(&TreeEntIdleAnimation, true);
 	SpiderActor->RegisterTarget(MainPlayer);
 
 	LightGenerator = GameWorld.SpawnActor<GeneratorActor>();

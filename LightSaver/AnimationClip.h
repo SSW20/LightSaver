@@ -35,7 +35,15 @@ public:
 	float GetDurationTicks() const { return DurationTicks; }
 	float GetTicksPerSecond() const { return TicksPerSecond; }
 	size_t GetChannelCount() const { return Channels.size(); }
-	const AnimationChannel* FindChannel(const std::string& NodeName) const { return &Channels.find(NodeName)->second; }
+	const AnimationChannel* FindChannel(const std::string& NodeName) const
+	{
+		auto Iter = Channels.find(NodeName);
+		if (Iter == Channels.end())
+		{
+			return nullptr;
+		}
+		return &Iter->second;
+	}
 
 private:
 	std::string Name;

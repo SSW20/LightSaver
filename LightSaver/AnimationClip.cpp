@@ -14,7 +14,7 @@ bool AnimationClip::Initialize(const std::string& FilePath)
 	const unsigned int ImportFlag = aiProcess_MakeLeftHanded;
 	Importer.SetPropertyBool(AI_CONFIG_IMPORT_FBX_PRESERVE_PIVOTS,false);	// Pivot 정보 보존으로 인한 중간 노드 생성 금지
 	const aiScene* Scene = Importer.ReadFile(FilePath, ImportFlag);
-	if (Scene == nullptr || Scene->mNumAnimations == 0 || (Scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)) return false;
+	if (Scene == nullptr || Scene->mNumAnimations == 0) return false;
 
 	aiAnimation* SourceAnimation = Scene->mAnimations[0];
 	TicksPerSecond = SourceAnimation->mTicksPerSecond;
