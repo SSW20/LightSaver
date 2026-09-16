@@ -16,6 +16,7 @@ public:
 	void Play(AnimationClip* InClip, bool bInLoop);
 	XMMATRIX CalculateNodeLocalTransform(const SkeletalNode* InNode);
 	const std::vector<XMFLOAT4X4>& GetFinalBoneMatrices() const { return FinalBoneMatrices; }
+	void SetPaused(bool InPaused) { bPaused = InPaused; }
 private:
 	void CalculateBoneTransforms(const SkeletalNode& Node, XMMATRIX ParentGlobalTransform);
 	size_t FindNearestPosKey(const AnimationChannel& AnimChannel);
@@ -30,5 +31,6 @@ private:
 
 	float CurrentTick = 0.0f;
 	bool bLoop = false;
+	bool bPaused = false;
 	std::vector<XMFLOAT4X4> FinalBoneMatrices;
 };

@@ -1,6 +1,7 @@
 #pragma once
 #include "PlayerActor.h"
 #include "World.h"
+#include "AnimationClip.h"
 
 class NavigationGrid;
 
@@ -17,7 +18,7 @@ public:
 	void RegisterTarget(Actor* Player);
 	void Initialize(World* InWorld, NavigationGrid* InFirstFloorNav, NavigationGrid* InSecondFloorNav);
 	void Reset(const DirectX::XMFLOAT3& SpawnPosition);
-
+	void SetAnimations(AnimationClip* InIdle,AnimationClip* InWalk, AnimationClip* InAttack);
 protected:
 	virtual void OnUpdate(float DeltaTime) override;
 	bool IsInLight();
@@ -31,7 +32,7 @@ private:
 
 	PlayerActor* Target = nullptr;
 	MonsterState CurrentState = MonsterState::Chase;
-	float MovementSpeed = 5.0f;
+	float MovementSpeed = 2.0f;
 	float AttackRange = 1.2f;
 	float RayStart = 2.0f;
 	float RayEnd = 3.0f;
@@ -54,5 +55,13 @@ private:
 	float PathUpdateTimer = 0.0f;
 	float PathUpdateInterval = 0.5f;
 	float WaypointAcceptanceRadius = 0.2f;
+
+	float AttackInterval = 1.2f;
+	float AttackUpateTimer = 0.0f;
+
+	AnimationClip* IdleAnimation = nullptr;
+	AnimationClip* WalkAnimation = nullptr;
+	AnimationClip* AttackAnimation = nullptr;
+	AnimationClip* CurrentAnimation = nullptr;
 };
 

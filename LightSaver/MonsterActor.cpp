@@ -1,6 +1,7 @@
 #include "MonsterActor.h"
 #include "NavigationGrid.h"
 #include <cmath>
+#include "SkeletalMeshComponent.h"
 
 namespace
 {
@@ -38,11 +39,13 @@ void MonsterActor::OnUpdate(float DeltaTime)
 	{
 	case MonsterState::Chase:
 		UpdateChase(DeltaTime);
+		AttackUpateTimer -= DeltaTime;
 		break;
 	case MonsterState::Frozen:
 		UpdateFrozen();
 		break;
 	case MonsterState::Attack:
+		AttackUpateTimer -= DeltaTime;
 		UpdateAttack();
 		break;
 	}
@@ -70,9 +73,42 @@ void MonsterActor::ChangeState(MonsterState NewState)
 	if (CurrentState == NewState) return;
 
 	CurrentState = NewState;
+
+	SkeletalMeshComponent* Mesh = FindComponent<SkeletalMeshComponent>();
+
+	if (CurrentState == MonsterState::Frozen)
+	{
+		if (Mesh != nullptr)
+		{
+			Mesh->SetAnimationPaused(true);
+		}
+	}
+
 	if (CurrentState == MonsterState::Chase)
 	{
 		PathUpdateTimer = 0.0f;
+		if (Mesh != nullptr)
+		{
+			if (CurrentAnimation != WalkAnimation)
+			{
+				Mesh->Play(WalkAnimation, true);
+				CurrentAnimation = WalkAnimation;
+			}
+			Mesh->SetAnimationPaused(false);
+		}
+	}
+
+	if (CurrentState == MonsterState::Attack)
+	{
+		if (Mesh != nullptr)
+		{
+			Mesh->SetAnimationPaused(false);
+			if (CurrentAnimation != AttackAnimation)
+			{
+				Mesh->Play(AttackAnimation, true);
+				CurrentAnimation = AttackAnimation;
+			}
+		}
 	}
 }
 
@@ -241,7 +277,11 @@ void MonsterActor::UpdateFrozen()
 void MonsterActor::UpdateAttack()
 {
 	if (Target == nullptr || !Target->IsAlive()) return;
-	Target->TakeDamage(1);
+	if (AttackUpateTimer <= 0.0f)
+	{
+		Target->TakeDamage(1);
+		AttackUpateTimer = AttackInterval;
+	}
 }
 
 bool MonsterActor::HasLineOfSightToTarget()
@@ -296,10 +336,7 @@ bool MonsterActor::IsInLight()
 
 }
 
-void MonsterActor::Initialize(
-	World* InWorld,
-	NavigationGrid* InFirstFloorNav,
-	NavigationGrid* InSecondFloorNav)
+void MonsterActor::Initialize(World* InWorld,NavigationGrid* InFirstFloorNav,NavigationGrid* InSecondFloorNav)
 {
 	if (InWorld == nullptr || InFirstFloorNav == nullptr || InSecondFloorNav == nullptr) return;
 	GameWorld = InWorld;
@@ -322,5 +359,30 @@ void MonsterActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
 	CurrentPath.clear();
 	CurrentPathIndex = 0;
 	PathUpdateTimer = 0.0f;
+	AttackUpateTimer = 0.0f;
 	StairDirection = StairTravelDirection::None;
+
+	SkeletalMeshComponent* Mesh = FindComponent<SkeletalMeshComponent>();
+
+	if (Mesh != nullptr && WalkAnimation != nullptr)
+	{
+		CurrentAnimation = WalkAnimation;
+		Mesh->Play(WalkAnimation, true);
+	}
+}
+
+void MonsterActor::SetAnimations(AnimationClip* InIdle, AnimationClip* InWalk, AnimationClip* InAttack)
+{
+	IdleAnimation = InIdle;
+	WalkAnimation = InWalk;
+	AttackAnimation = InAttack;
+
+	SkeletalMeshComponent* Mesh = FindComponent<SkeletalMeshComponent>();
+
+	// 초기 상태가 Chase이므로 처음에는 Walk
+	if (Mesh != nullptr && WalkAnimation != nullptr)
+	{
+		CurrentAnimation = WalkAnimation;
+		Mesh->Play(WalkAnimation, true);
+	}
 }

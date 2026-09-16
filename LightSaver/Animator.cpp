@@ -22,7 +22,7 @@ bool Animator::Initialize(SkeletalModel* InModel)
 }
 void Animator::Update(float DeltaTime)
 {
-	if (AnimClip == nullptr)
+	if (AnimClip == nullptr || bPaused)
 	{
 		return;
 	}
@@ -59,6 +59,7 @@ void Animator::Play(AnimationClip* InClip, bool bInLoop)
 	AnimClip = InClip;
 	CurrentTick = 0.0f;
 	bLoop = bInLoop;
+	bPaused = false;
 }
 
 XMMATRIX Animator::CalculateNodeLocalTransform(const SkeletalNode* InNode)

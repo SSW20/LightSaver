@@ -19,6 +19,7 @@ bool LightSaverGame::OnInitialize()
 	// 같은 Skeleton을 사용하는 애니메이션 동작들을 읽는다.
 	if (!TreeEntIdleAnimation.Initialize("Assets/Models/TreeEnt/Animations/Idle1.fbx")) return false;
 	if (!TreeEntWalkAnimation.Initialize("Assets/Models/TreeEnt/Animations/Walk.fbx")) return false;
+	if (!TreeEntAttackAnimation.Initialize("Assets/Models/TreeEnt/Animations/Attack1.fbx")) return false;
 
 	if (!GeneratorModel.Initialize(GetGraphics().Device, "Assets/Models/GeneratorBox.obj")) return false;
 	if (!Hospital.Initialize(GetGraphics().Device, GameWorld)) return false;
@@ -29,8 +30,8 @@ bool LightSaverGame::OnInitialize()
 	SpiderActor = GameWorld.SpawnActor<MonsterActor>();
 	SpiderActor->GetActorTransform().Scale = { 0.01f, 0.01f, 0.01f };
 	SkeletalMeshComponent* TreeEntMesh = SpiderActor->AddComponent<SkeletalMeshComponent>(&TreeEntModel);
-	TreeEntMesh->Play(&TreeEntIdleAnimation, true);
 	SpiderActor->RegisterTarget(MainPlayer);
+	SpiderActor->SetAnimations(&TreeEntIdleAnimation,&TreeEntWalkAnimation, &TreeEntAttackAnimation);
 
 	LightGenerator = GameWorld.SpawnActor<GeneratorActor>();
 	LightGenerator->GetActorTransform().Scale = { 5.0f, 5.0f, 5.0f };

@@ -20,6 +20,11 @@ void SkeletalMeshComponent::Play(AnimationClip* InClip, bool bLoop)
 	AnimationPlayer.Play(InClip, bLoop);
 }
 
+void SkeletalMeshComponent::SetAnimationPaused(bool bPaused)
+{
+    AnimationPlayer.SetPaused(bPaused);
+}
+
 void SkeletalMeshComponent::CollectRenderObjects(std::vector<RenderObject>& RenderObjects) const
 {
     if (ModelSet == nullptr || GetOwner() == nullptr)

@@ -13,6 +13,7 @@ public:
 	virtual void Update(float DeltaTime) override;
 	virtual void CollectRenderObjects(std::vector<RenderObject>& RenderObjects) const override;
 	void Play(AnimationClip* InClip,bool bLoop);
+	void SetAnimationPaused(bool bPaused);
 
 private:
 	SkeletalModel* ModelSet = nullptr;

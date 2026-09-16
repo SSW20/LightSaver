@@ -42,6 +42,7 @@ private:
 	SkeletalModel TreeEntModel;
 	AnimationClip TreeEntIdleAnimation;
 	AnimationClip TreeEntWalkAnimation;
+	AnimationClip TreeEntAttackAnimation;
 	HospitalLevel Hospital;
 	World GameWorld;
 	MonsterActor* SpiderActor = nullptr;
