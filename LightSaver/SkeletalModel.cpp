@@ -2,14 +2,20 @@
 
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
+#include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/config.h>
+#include <filesystem>
 
-bool SkeletalModel::Initialize(ID3D11Device* Device, const std::string& FilePath)
+bool SkeletalModel::Initialize(
+	ID3D11Device* Device,
+	const std::string& FilePath,
+	const std::unordered_map<std::string, std::string>& TextureOverrides)
 {
 	BoneInfos.clear();
 	BoneInfoMap.clear();
 	SkeletalModelDatas.clear();
+	SkeletalMaterialDatas.clear();
 
 	Assimp::Importer Importer;
 
@@ -24,43 +30,6 @@ bool SkeletalModel::Initialize(ID3D11Device* Device, const std::string& FilePath
 
 	CopyNodeTree(Scene->mRootNode, RootNode);
 
-	//std::filesystem::path ModelPath = FilePath;
-	//for (UINT i = 0; i < Scene->mNumMaterials; ++i)
-	{
-		//auto NewTexture = std::make_unique<Texture>();
-		//aiMaterial* SourceMaterial = Scene->mMaterials[i];
-		//aiString TexturePath;
-		//if (SourceMaterial->GetTexture(aiTextureType_DIFFUSE, 0, &TexturePath) == AI_SUCCESS)
-		//{
-		//	std::filesystem::path FullTexturePath = ModelPath.parent_path() / TexturePath.C_Str();
-
-		//	if (!NewTexture->Initialize(Device, FullTexturePath.c_str())) return false;
-		//	MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
-		//}
-		//else if (DefaultTexturePath != nullptr)
-		//{
-		//	if (!NewTexture->Initialize(Device, DefaultTexturePath)) return false;
-		//	MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
-		//}
-		//else
-		//{
-		//	NewTexture->InitializeByColor(Device, 255, 255, 255, 255);
-		//	MaterialDatas[i].DiffuseTexture = std::move(NewTexture);
-		//}
-
-		/*aiColor3D SpecularColor(0.2f, 0.2f, 0.2f);
-		if (SourceMaterial->Get(AI_MATKEY_COLOR_SPECULAR, SpecularColor) == AI_SUCCESS)
-		{
-			MaterialDatas[i].SpecularStrength = std::max(SpecularColor.r, std::max(SpecularColor.g, SpecularColor.b));
-		}
-		float SpecularPower = 32.0f;
-		if (SourceMaterial->Get(AI_MATKEY_SHININESS, SpecularPower) == AI_SUCCESS)
-		{
-			MaterialDatas[i].SpecularPower = std::max(SpecularPower, 1.0f);
-		}*/
-
-	}
-
 
 	for (UINT i = 0; i < Scene->mNumMeshes; ++i)
 	{
@@ -74,10 +43,61 @@ bool SkeletalModel::Initialize(ID3D11Device* Device, const std::string& FilePath
 		SkeletalModelDatas.push_back(std::move(NewModelData));
 	}
 
+	SkeletalMaterialDatas.resize(Scene->mNumMaterials);
+	std::filesystem::path ModelPath = FilePath;
+	for (UINT i = 0; i < Scene->mNumMaterials; ++i)
+	{
+		bool bLoaded = false;
+		auto NewTexture = std::make_unique<Texture>();
+		aiMaterial* SourceMaterial = Scene->mMaterials[i];
+		aiString MaterialName;
+		SourceMaterial->Get(AI_MATKEY_NAME, MaterialName);
+		const auto Override = TextureOverrides.find(MaterialName.C_Str());
+		if (Override != TextureOverrides.end())
+		{
+			// FBX에 남은 예전 경로 대신 이 모델에 지정된 텍스처를 사용한다.
+			std::filesystem::path FullTexturePath = ModelPath.parent_path() / Override->second;
+			if (!std::filesystem::exists(FullTexturePath) ||
+				!NewTexture->Initialize(Device, FullTexturePath.c_str()))
+			{
+				return false;
+			}
+			bLoaded = true;
+		}
+		else
+		{
+			aiString TexturePath;
+			if (SourceMaterial->GetTexture(aiTextureType_DIFFUSE, 0, &TexturePath) == AI_SUCCESS)
+			{
+				std::filesystem::path FullTexturePath = ModelPath.parent_path() / TexturePath.C_Str();
+				if (std::filesystem::exists(FullTexturePath))
+				{
+					if (!NewTexture->Initialize(Device, FullTexturePath.c_str())) return false;
+					bLoaded = true;
+				}
+			}
+		}
+		if (!bLoaded)
+		{
+			NewTexture->InitializeByColor(Device, 255, 255, 255, 255);
+		}
+
+		SkeletalMaterialDatas[i].DiffuseTexture = std::move(NewTexture);
+	}
+		//aiColor3D SpecularColor(0.2f, 0.2f, 0.2f);
+		//if (SourceMaterial->Get(AI_MATKEY_COLOR_SPECULAR, SpecularColor) == AI_SUCCESS)
+		//{
+		//	SkeletalModelDatas[i].SpecularStrength = std::max(SpecularColor.r, std::max(SpecularColor.g, SpecularColor.b));
+		//}
+		//float SpecularPower = 32.0f;
+		//if (SourceMaterial->Get(AI_MATKEY_SHININESS, SpecularPower) == AI_SUCCESS)
+		//{
+		//	SkeletalModelDatas[i].SpecularPower = std::max(SpecularPower, 1.0f);
+		//}
+
 
 	return true;
 }
-
 UINT SkeletalModel::FindOrCreateBoneIndex(const std::string& BoneName)
 {
 	if (BoneInfoMap.find(BoneName) == BoneInfoMap.end())
@@ -113,6 +133,7 @@ void SkeletalModel::Draw(ID3D11DeviceContext* DeviceContext)
 		{
 			continue;
 		}
+		SkeletalMaterialDatas[ModelData.MaterialIndex].DiffuseTexture->Bind(DeviceContext);
 		ModelData.MeshData->Bind(DeviceContext);
 		DeviceContext->DrawIndexed(ModelData.MeshData->GetIndexCount(),0,0);
 	}

@@ -17,6 +17,7 @@ public:
 	XMMATRIX CalculateNodeLocalTransform(const SkeletalNode* InNode);
 	const std::vector<XMFLOAT4X4>& GetFinalBoneMatrices() const { return FinalBoneMatrices; }
 	void SetPaused(bool InPaused) { bPaused = InPaused; }
+	bool IsFinished();
 private:
 	void CalculateBoneTransforms(const SkeletalNode& Node, XMMATRIX ParentGlobalTransform);
 	size_t FindNearestPosKey(const AnimationChannel& AnimChannel);

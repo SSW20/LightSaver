@@ -19,6 +19,7 @@ public:
 	void Initialize(World* InWorld, NavigationGrid* InFirstFloorNav, NavigationGrid* InSecondFloorNav);
 	void Reset(const DirectX::XMFLOAT3& SpawnPosition);
 	void SetAnimations(AnimationClip* InIdle,AnimationClip* InWalk, AnimationClip* InAttack);
+	float GetGroundOffset() const { return GroundOffset; }
 protected:
 	virtual void OnUpdate(float DeltaTime) override;
 	bool IsInLight();
@@ -36,9 +37,9 @@ private:
 	float AttackRange = 1.2f;
 	float RayStart = 2.0f;
 	float RayEnd = 3.0f;
-	float GroundOffset = 0.4223f;
+	float GroundOffset = 0.02f;
 	float RotationSpeed = 5.0f;
-	float ModelYawOffset = DirectX::XM_PIDIV2;
+	float ModelYawOffset = 0.0f;
 	DirectX::XMFLOAT3 LightCheckOffset = { 0.0f, 0.5f, 0.0f };
 	World* GameWorld = nullptr;
 	NavigationGrid* FirstFloorNavGrid = nullptr;

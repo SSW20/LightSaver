@@ -94,29 +94,17 @@ bool GameHUD::Render(GameState State, float DamageAlpha, bool bFocusTarget, bool
 	{
 	case GameState::MainMenu:
 	{
+		// 타이틀
 		const float TitleWidth = ScreenWidth * 0.75f;
 		const float TitleHeight = TitleWidth * (380.0f / 1632.0f);
 		const float TitleTop = ScreenHeight * 0.12f;
+		Renderer.AddRectanglePixelsImage(CenterX - TitleWidth * 0.5f,TitleTop,CenterX + TitleWidth * 0.5f,TitleTop + TitleHeight,White, &LightSaverTitleTexture);
 
-		Renderer.AddRectanglePixelsImage(
-			CenterX - TitleWidth * 0.5f,
-			TitleTop,
-			CenterX + TitleWidth * 0.5f,
-			TitleTop + TitleHeight,
-			White,
-			&LightSaverTitleTexture);
-
+		// 밑에 Press E Key
 		const float PromptWidth = ScreenWidth * 0.48f;
 		const float PromptHeight = PromptWidth * (240.0f / 1492.0f);
 		const float PromptTop = ScreenHeight * 0.75f;
-
-		Renderer.AddRectanglePixelsImage(
-			CenterX - PromptWidth * 0.5f,
-			PromptTop,
-			CenterX + PromptWidth * 0.5f,
-			PromptTop + PromptHeight,
-			White,
-			&PressEKeyToStartTexture);
+		Renderer.AddRectanglePixelsImage(CenterX - PromptWidth * 0.5f,PromptTop,CenterX + PromptWidth * 0.5f,PromptTop + PromptHeight,White,&PressEKeyToStartTexture);
 
 		break;
 	}
@@ -163,11 +151,13 @@ bool GameHUD::Render(GameState State, float DamageAlpha, bool bFocusTarget, bool
 
 	case GameState::PlayerDead:
 	{
+		// YOU DIED
 		float ImageWidth = 500.0f;
 		float ImageHeight = 500.0f;
 		float ImageTop = 20.0f;
 		Renderer.AddRectanglePixelsImage(CenterX - ImageWidth * 0.5f, ImageTop, CenterX + ImageWidth * 0.5f, ImageTop + ImageHeight, White, &YouDiedTexture);
 
+		// 버튼
 		ButtonBounds StartBounds;
 		ButtonBounds ExitBounds;
 		GetResultButtonBounds(StartBounds, ExitBounds);

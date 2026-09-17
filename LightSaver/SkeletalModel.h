@@ -6,6 +6,7 @@
 #include<unordered_map>
 #include <memory>
 #include "SkeletalMesh.h"
+#include "Texture.h"
 using namespace DirectX;
 
 struct aiMesh;
@@ -23,6 +24,11 @@ struct SkeletalNode
     std::vector<SkeletalNode> Children;
 };
 
+struct SkeletalMaterialData
+{
+    std::unique_ptr<Texture> DiffuseTexture;
+};
+
 struct BoneInfo
 {
     std::string BoneName;
@@ -32,7 +38,10 @@ struct BoneInfo
 class SkeletalModel
 {
 public:
-    bool Initialize(ID3D11Device* Device, const std::string& FilePath);
+    bool Initialize(
+        ID3D11Device* Device,
+        const std::string& FilePath,
+        const std::unordered_map<std::string, std::string>& TextureOverrides = {});
     const SkeletalNode& GetRootNode() const { return RootNode; }
     size_t GetBoneCount() const{return BoneInfos.size(); }
     bool FindBoneIndex(const std::string& BoneName, UINT& OutBoneIndex);
@@ -47,4 +56,5 @@ private:
 
     SkeletalNode RootNode;
     std::vector<SkeletalModelData> SkeletalModelDatas;
+    std::vector<SkeletalMaterialData> SkeletalMaterialDatas;
 };

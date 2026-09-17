@@ -1,15 +1,17 @@
 #include "MonsterActor.h"
+#include "HospitalLevel.h"
 #include "NavigationGrid.h"
 #include <cmath>
 #include "SkeletalMeshComponent.h"
 
 namespace
 {
-	constexpr float FloorBoundaryY = 3.0f;
-	constexpr float StairEntryRadius = 0.75f;
-	const DirectX::XMFLOAT3 MonsterCollisionHalfSize = { 0.8f, 0.5f, 0.8f };
-	const DirectX::XMFLOAT3 StairBottom = { -12.0f, 0.2f, -8.4f };
-	const DirectX::XMFLOAT3 StairTop = { -12.0f, 5.2f, 6.0f };
+	constexpr float LevelScale = HospitalLevel::WorldScale;
+	constexpr float FloorBoundaryY = 3.0f * LevelScale;
+	constexpr float StairEntryRadius = 0.75f * LevelScale;
+	const DirectX::XMFLOAT3 MonsterCollisionHalfSize = { 1.12f, 0.7f, 1.12f };
+	const DirectX::XMFLOAT3 StairBottom = { -12.0f * LevelScale, 0.2f * LevelScale, -8.4f * LevelScale };
+	const DirectX::XMFLOAT3 StairTop = { -12.0f * LevelScale, 5.2f * LevelScale, 6.0f * LevelScale };
 
 	float GetDistanceXZ(const DirectX::XMFLOAT3& A, const DirectX::XMFLOAT3& B)
 	{
@@ -64,6 +66,8 @@ void MonsterActor::UpdateState(bool bInLight, float DistanceToTarget)
 	}
 	else
 	{
+		SkeletalMeshComponent* Mesh = FindComponent<SkeletalMeshComponent>();
+		if (!Mesh->IsFinished() && CurrentState == MonsterState::Attack) return;
 		ChangeState(MonsterState::Chase);
 	}
 }
@@ -87,7 +91,7 @@ void MonsterActor::ChangeState(MonsterState NewState)
 	if (CurrentState == MonsterState::Chase)
 	{
 		PathUpdateTimer = 0.0f;
-		if (Mesh != nullptr)
+		if (Mesh != nullptr || Mesh->IsFinished())
 		{
 			if (CurrentAnimation != WalkAnimation)
 			{
@@ -105,7 +109,7 @@ void MonsterActor::ChangeState(MonsterState NewState)
 			Mesh->SetAnimationPaused(false);
 			if (CurrentAnimation != AttackAnimation)
 			{
-				Mesh->Play(AttackAnimation, true);
+				Mesh->Play(AttackAnimation, false);
 				CurrentAnimation = AttackAnimation;
 			}
 		}
@@ -119,8 +123,7 @@ void MonsterActor::UpdateChase(float DeltaTime)
 
 	if (StairDirection != StairTravelDirection::None)
 	{
-		const DirectX::XMFLOAT3& StairDestination =
-			StairDirection == StairTravelDirection::Up ? StairTop : StairBottom;
+		const DirectX::XMFLOAT3& StairDestination = StairDirection == StairTravelDirection::Up ? StairTop : StairBottom;
 
 		if (GetDistanceXZ(ActorPosition, StairDestination) < WaypointAcceptanceRadius)
 		{
@@ -216,7 +219,10 @@ void MonsterActor::UpdateChase(float DeltaTime)
 	if (!GameWorld->FindFloor(CandidatePosition, RayStart, RayEnd, GroundHit)) return;
 
 	CandidatePosition.y = GroundHit.Position.y + GroundOffset;
-	if (GameWorld->OverlapAABB(CreateAABBFromCenter(CandidatePosition, MonsterCollisionHalfSize)))
+	// 모델 원점은 발 근처에 두고, 충돌 상자는 바닥 위에 올려 Grid 검사와 높이를 맞춘다.
+	DirectX::XMFLOAT3 CollisionCenter = CandidatePosition;
+	CollisionCenter.y = GroundHit.Position.y + MonsterCollisionHalfSize.y;
+	if (GameWorld->OverlapAABB(CreateAABBFromCenter(CollisionCenter, MonsterCollisionHalfSize)))
 	{
 		return;
 	}
@@ -224,7 +230,8 @@ void MonsterActor::UpdateChase(float DeltaTime)
 	GetActorTransform().Position = CandidatePosition;
 
 	// 회전 설정
-	DirectX::XMVECTOR GroundNormal = DirectX::XMLoadFloat3(&GroundHit.Normal);
+	/*DirectX::XMVECTOR GroundNormal = DirectX::XMLoadFloat3(&GroundHit.Normal);*/
+	DirectX::XMVECTOR GroundNormal = XMVectorSet(0.0f, 1.0f, 0.0f,0.0f);
 	GroundNormal = DirectX::XMVector3Normalize(GroundNormal);
 
 	DirectX::XMVECTOR DesiredForward = ToWaypoint;

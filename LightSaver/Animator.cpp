@@ -51,7 +51,10 @@ float Animator::GetCurrentTick()
 {
 	return CurrentTick;
 }
-
+bool Animator::IsFinished()
+{
+	return AnimClip != nullptr && !bLoop && CurrentTick >= AnimClip->GetDurationTicks();
+}
 
 
 void Animator::Play(AnimationClip* InClip, bool bInLoop)

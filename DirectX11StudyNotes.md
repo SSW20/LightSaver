@@ -12699,10 +12699,28 @@ if (Scene == nullptr || Scene->mNumAnimations == 0)
 [완료] Tree Ent 모델과 Idle/Walk Clip 로드
 [완료] 기존 Spider 표시를 Tree Ent로 교체
 
-[다음] Animator Pause
-[다음] Idle, Chase, Frozen, Attack 상태와 Clip 연결
-[다음] Attack Clip 로드
+[완료] Animator Pause와 비반복 Clip 종료 판정
+[완료] Chase/Frozen/Attack 상태와 Walk/Attack Clip 연결
+[완료] SkeletalModel Material별 BaseColor 텍스처 연결
+[완료] 병원 크기·출입구·탈출실 벽 연결 및 몬스터 크기 조정
+
+[다음] AudioSystem을 만들고 Test.wav 한 번 재생하기
 [다음] 두 번째 몬스터와 반대 Light 반응
-[다음] SkeletalModel Material과 Texture 연결
-[다음] Scale, 방향, Collider 최종 조정
+[확인] 게임 실행 중 문·계단·탈출실 이동과 남은 시각적 틈 점검
 ```
+
+## 40. Tree Ent 애니메이션과 텍스처
+
+`Animator::IsFinished()`는 반복하지 않는 Clip이 마지막 Tick에 도달했는지 알려준다. `SkeletalMeshComponent`가 이 결과를 몬스터 상태 전환에 전달한다. 빛을 받으면 현재 애니메이션을 일시정지하고, 공격 Clip은 반복하지 않도록 설정했다.
+
+Tree Ent FBX에는 현재 프로젝트에서 사용할 수 없는 원본 텍스처 경로가 남아 있다. 따라서 `SkeletalModel::Initialize()`가 Material 이름별 텍스처 경로를 선택할 수 있도록 하고, 네 장의 BaseColor PNG를 `Assets/Models/TreeEnt/Textures`에 배치했다. 각 Mesh의 `MaterialIndex`로 해당 Material의 텍스처를 Draw 전에 Bind한다.
+
+## 41. 병원 맵과 몬스터 크기
+
+병원 모듈과 두 층 높이를 `HospitalLevel::WorldScale = 1.5f`에 맞춰 확대했다. 플레이어·몬스터·발전기·탈출 구역의 배치와 두 NavigationGrid의 범위도 같은 좌표계로 맞췄다.
+
+출입구 모델과 문틀 충돌체는 좌우로 넓히고, 문 바로 옆 벽 조각의 끝을 조정해 넓어진 통로를 다시 가리지 않게 했다. 2층 탈출실 입구는 양옆 벽과 문틀 사이에 생기는 짧은 틈을 작은 벽 조각으로 메웠다.
+
+Tree Ent의 Actor Scale은 `0.007f`이다. 길찾기와 실제 이동의 충돌 상자 HalfSize는 모두 `{ 1.12f, 0.7f, 1.12f }`로 맞췄다. 모델 원점은 발 근처에 두되, 이동 충돌 상자의 중심은 바닥에서 HalfSize.y만큼 올려 검사한다.
+
+다음 작업은 사운드 한 개 재생으로 `AudioSystem`의 기본 흐름을 확인하고, 그 뒤에 빛을 받으면 움직이는 두 번째 몬스터를 추가하는 것이다. 게임 안에서의 문·계단 통과와 시각적 이음새는 계속 확인해야 한다.

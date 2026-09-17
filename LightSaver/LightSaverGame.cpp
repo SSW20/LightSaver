@@ -13,8 +13,16 @@
 
 bool LightSaverGame::OnInitialize()
 {
+	constexpr float LevelScale = HospitalLevel::WorldScale;
+
 	// Tree Ent의 몸과 Skeleton 정보를 읽는다.
-	if (!TreeEntModel.Initialize(GetGraphics().Device, "Assets/Models/TreeEnt/TreeEntAsh.fbx")) return false;
+	if (!TreeEntModel.Initialize(GetGraphics().Device, "Assets/Models/TreeEnt/TreeEntAsh.fbx",
+		{
+			{ "M_TreeEntAsh_Branch", "Textures/T_TreeEntAsh_Branches_BaseColor.png" },
+			{ "M_TreeEntAsh_Head", "Textures/T_TreeEntAsh_Head_BaseColor.png" },
+			{ "M_TreeEntAsh_Down", "Textures/T_TreeEntAsh_Down_BaseColor.png" },
+			{ "M_TreeEntAsh_Up", "Textures/T_TreeEntAsh_Up_BaseColor.png" }
+		})) return false;
 
 	// 같은 Skeleton을 사용하는 애니메이션 동작들을 읽는다.
 	if (!TreeEntIdleAnimation.Initialize("Assets/Models/TreeEnt/Animations/Idle1.fbx")) return false;
@@ -28,7 +36,7 @@ bool LightSaverGame::OnInitialize()
 	MainPlayerController.Possess(MainPlayer);
 
 	SpiderActor = GameWorld.SpawnActor<MonsterActor>();
-	SpiderActor->GetActorTransform().Scale = { 0.01f, 0.01f, 0.01f };
+	SpiderActor->GetActorTransform().Scale = { 0.007f, 0.007f, 0.007f };
 	SkeletalMeshComponent* TreeEntMesh = SpiderActor->AddComponent<SkeletalMeshComponent>(&TreeEntModel);
 	SpiderActor->RegisterTarget(MainPlayer);
 	SpiderActor->SetAnimations(&TreeEntIdleAnimation,&TreeEntWalkAnimation, &TreeEntAttackAnimation);
@@ -43,39 +51,39 @@ bool LightSaverGame::OnInitialize()
 	LightGeneratorCollision.Max = { 0.5f,  0.5f,  0.1f };
 	LightGeneratorCollider->SetCollisionBox(LightGeneratorCollision);
 
-	const DirectX::XMFLOAT3 FirstFloorMin = { -14.0f,-1.0f,-10.0f };
-	const DirectX::XMFLOAT3 FirstFloorMax = { 14.0f,4.5f,18.0f };
-	const DirectX::XMFLOAT3 SecondFloorGridMin = { -14.0f,4.5f,-10.0f };
-	const DirectX::XMFLOAT3 SecondFloorGridMax = { 14.0f,10.5f,18.0f };
-	const DirectX::XMFLOAT3 MonsterHalfSize = { 0.8f,0.5f,0.8f };
+	const DirectX::XMFLOAT3 FirstFloorMin = { -14.0f * LevelScale,-1.0f * LevelScale,-10.0f * LevelScale };
+	const DirectX::XMFLOAT3 FirstFloorMax = { 14.0f * LevelScale,4.5f * LevelScale,18.0f * LevelScale };
+	const DirectX::XMFLOAT3 SecondFloorGridMin = { -14.0f * LevelScale,4.5f * LevelScale,-10.0f * LevelScale };
+	const DirectX::XMFLOAT3 SecondFloorGridMax = { 14.0f * LevelScale,10.5f * LevelScale,18.0f * LevelScale };
+	const DirectX::XMFLOAT3 MonsterHalfSize = { 1.12f,0.7f,1.12f };
 
 	RaycastHitResult GroundHit = {};
-	PlayerSpawnPosition = { 0.0f, FirstFloorMax.y, -6.0f };
+	PlayerSpawnPosition = { 0.0f, FirstFloorMax.y, -6.0f * LevelScale };
 	if (!GameWorld.FindFloor(PlayerSpawnPosition, 0.0f, FirstFloorMax.y - FirstFloorMin.y, GroundHit)) return false;
 	PlayerSpawnPosition.y = GroundHit.Position.y + 0.8f;
 	MainPlayer->SetPlayerPosition(PlayerSpawnPosition);
 
-	SpiderSpawnPosition = { 0.0f, SecondFloorGridMax.y, 14.0f };
+	SpiderSpawnPosition = { 0.0f, SecondFloorGridMax.y, 14.0f * LevelScale };
 	if (!GameWorld.FindFloor(SpiderSpawnPosition, 0.0f, SecondFloorGridMax.y - SecondFloorGridMin.y, GroundHit)) return false;
-	SpiderSpawnPosition.y = GroundHit.Position.y + 0.4223f;
+	SpiderSpawnPosition.y = GroundHit.Position.y + SpiderActor->GetGroundOffset();
 	SpiderActor->GetActorTransform().Position = SpiderSpawnPosition;
 
-	DirectX::XMFLOAT3 GeneratorPosition = { 8.0f, SecondFloorGridMax.y, 8.0f };
+	DirectX::XMFLOAT3 GeneratorPosition = { 8.0f * LevelScale, SecondFloorGridMax.y, 8.0f * LevelScale };
 	if (!GameWorld.FindFloor(GeneratorPosition, 0.0f, SecondFloorGridMax.y - SecondFloorGridMin.y, GroundHit)) return false;
 	GeneratorPosition.y = GroundHit.Position.y + 2.5f;
 	LightGenerator->GetActorTransform().Position = GeneratorPosition;
 
 	ExitZone = GameWorld.SpawnActor<ExitZoneActor>();
-	DirectX::XMFLOAT3 ExitZonePosition = { -12.0f, SecondFloorGridMax.y, 16.0f };
+	DirectX::XMFLOAT3 ExitZonePosition = { -12.0f * LevelScale, SecondFloorGridMax.y, 16.0f * LevelScale };
 	if (!GameWorld.FindFloor(ExitZonePosition, 0.0f, SecondFloorGridMax.y - SecondFloorGridMin.y, GroundHit)) return false;
-	ExitZonePosition.y = GroundHit.Position.y + 0.05f;
+	ExitZonePosition.y = GroundHit.Position.y + 0.05f * LevelScale;
 	ExitZone->GetActorTransform().Position = ExitZonePosition;
-	ExitZone->GetActorTransform().Scale = { 4.0f, 0.1f, 4.0f };
-	ExitZone->SetTriggerHalfSize({ 2.0f, 1.5f, 2.0f });
+	ExitZone->GetActorTransform().Scale = { 4.0f * LevelScale, 0.1f * LevelScale, 4.0f * LevelScale };
+	ExitZone->SetTriggerHalfSize({ 2.0f * LevelScale, 1.5f * LevelScale, 2.0f * LevelScale });
 	ExitZone->AddComponent<MeshComponent>(&GeneratorModel);
 
-	if (!FirstFloorMonsterNavGrid.Build(GameWorld, FirstFloorMin, FirstFloorMax, 0.5f, MonsterHalfSize)) return false;
-	if (!SecondFloorMonsterNavGrid.Build(GameWorld, SecondFloorGridMin, SecondFloorGridMax, 0.5f, MonsterHalfSize)) return false;
+	if (!FirstFloorMonsterNavGrid.Build(GameWorld, FirstFloorMin, FirstFloorMax, 0.5f * LevelScale, MonsterHalfSize)) return false;
+	if (!SecondFloorMonsterNavGrid.Build(GameWorld, SecondFloorGridMin, SecondFloorGridMax, 0.5f * LevelScale, MonsterHalfSize)) return false;
 	SpiderActor->Initialize(&GameWorld, &FirstFloorMonsterNavGrid, &SecondFloorMonsterNavGrid);
 
 	RenderManager.Initialize(GetGraphics());
