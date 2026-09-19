@@ -11,6 +11,9 @@ public:
 	void Interact(float DeltaTime) override;
 	void Reset();
 
+protected:
+	void OnUpdate(float DeltaTime) override;
+
 private:
 	bool bRepaired = false;
 	float TotalRepairTime = 3.0f;

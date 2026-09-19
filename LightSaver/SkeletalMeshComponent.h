@@ -15,6 +15,7 @@ public:
 	void Play(AnimationClip* InClip, bool bLoop);
 	void SetAnimationPaused(bool bPaused);
 	bool IsFinished() {return  AnimationPlayer.IsFinished(); }
+	float GetAnimationProgress() const { return AnimationPlayer.GetNormalizedTime(); }
 private:
 	SkeletalModel* ModelSet = nullptr;
 	Animator AnimationPlayer;

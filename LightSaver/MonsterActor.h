@@ -29,6 +29,7 @@ private:
 	void UpdateChase(float DeltaTime);
 	void UpdateFrozen();
 	void UpdateAttack();
+	void UpdateWalkFootsteps();
 	bool HasLineOfSightToTarget();
 
 	PlayerActor* Target = nullptr;
@@ -64,5 +65,7 @@ private:
 	AnimationClip* WalkAnimation = nullptr;
 	AnimationClip* AttackAnimation = nullptr;
 	AnimationClip* CurrentAnimation = nullptr;
+	float PreviousWalkAnimationProgress = 0.0f;
+	bool bMovedThisFrame = false;
 };
 

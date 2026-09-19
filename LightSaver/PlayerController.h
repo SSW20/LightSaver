@@ -33,6 +33,9 @@ private:
 	float Gravity = -9.8f;
 	float JumpSpeed = 5.0f;
 	DirectX::XMFLOAT3 PlayerHalfSize = { 0.3f, 0.8f, 0.3f };
+	float FootstepTimer = 0.0f;
+	float FootstepInterval = 0.42f;
+	bool bIsGrounded = false;
 
 	Actor* CurrentFocusActor = nullptr;
 	bool bFocusGenerator = false;

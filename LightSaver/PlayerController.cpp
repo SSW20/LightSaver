@@ -4,6 +4,7 @@
 #include <cmath>
 #include "World.h"
 #include "Interactable.h"
+#include "SoundManager.h"
 
 
 
@@ -34,6 +35,8 @@ void PlayerController::Possess(PlayerActor* InPlayer)
 void PlayerController::Reset()
 {
 	VerticalVelocity = 0.0f;
+	FootstepTimer = 0.0f;
+	bIsGrounded = false;
 	CurrentFocusActor = nullptr;
 	bFocusGenerator = false;
 	bInteracting = false;
@@ -97,9 +100,10 @@ void PlayerController::UpdateMovement(float DeltaTime, InputManager& Input, Worl
 	DirectX::XMFLOAT3 MoveAmount;
 	DirectX::XMStoreFloat3(&MoveAmount, Movement);
 	DirectX::XMFLOAT3 PlayerPosition = ControlledPlayer->GetPlayerPosition();
+	const DirectX::XMFLOAT3 StartPosition = PlayerPosition;
 
 	// 긴 프레임에 이동량이 벽 두께보다 커져도 반대편으로 건너뛰지 않도록
-	// 한 번의 이동을 최대 0.1 단위로 나누어 충돌 검사한다.
+	// 한 번의 이동을 최대 0.1 단위로 나누어 충돌 검사
 	constexpr float MaxCollisionStep = 0.1f;
 	const float MovementDistance = std::sqrt(
 		MoveAmount.x * MoveAmount.x + MoveAmount.z * MoveAmount.z);
@@ -131,6 +135,25 @@ void PlayerController::UpdateMovement(float DeltaTime, InputManager& Input, Worl
 	}
 
 	ControlledPlayer->SetPlayerPosition(PlayerPosition);
+
+	const float ActualMoveX = PlayerPosition.x - StartPosition.x;
+	const float ActualMoveZ = PlayerPosition.z - StartPosition.z;
+	const float ActualMoveDistanceSquared =
+		ActualMoveX * ActualMoveX + ActualMoveZ * ActualMoveZ;
+	if (bIsGrounded && ActualMoveDistanceSquared > 0.000001f)
+	{
+		FootstepTimer -= DeltaTime;
+		if (FootstepTimer <= 0.0f)
+		{
+			SoundManager::Get().Play2D(SoundID::PlayerFootstep, 0.3f);
+			FootstepTimer = FootstepInterval;
+		}
+	}
+	else
+	{
+		// 다시 걷기 시작하면 첫발이 즉시 들리도록 준비
+		FootstepTimer = 0.0f;
+	}
 }
 
 void PlayerController::UpdateVerticalMovement(float DeltaTime, InputManager& Input, World& GameWorld)
@@ -169,6 +192,7 @@ void PlayerController::UpdateVerticalMovement(float DeltaTime, InputManager& Inp
 		VerticalVelocity += Gravity * DeltaTime;
 		PlayerPosition.y += VerticalVelocity * DeltaTime;
 	}
+	bIsGrounded = bGround;
 
 	ControlledPlayer->SetPlayerPosition(PlayerPosition);
 }

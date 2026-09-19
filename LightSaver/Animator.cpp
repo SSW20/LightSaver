@@ -47,9 +47,19 @@ void Animator::Update(float DeltaTime)
 	CalculateBoneTransforms(SKModel->GetRootNode(),XMMatrixIdentity());
 
 }
-float Animator::GetCurrentTick()
+float Animator::GetCurrentTick() const
 {
 	return CurrentTick;
+}
+
+float Animator::GetNormalizedTime() const
+{
+	if (AnimClip == nullptr || AnimClip->GetDurationTicks() <= 0.0f)
+	{
+		return 0.0f;
+	}
+
+	return CurrentTick / AnimClip->GetDurationTicks();
 }
 bool Animator::IsFinished()
 {

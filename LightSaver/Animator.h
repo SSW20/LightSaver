@@ -12,7 +12,8 @@ class Animator
 public:
 	bool Initialize(SkeletalModel* InModel);
 	void Update(float DeltaTime);
-	float GetCurrentTick();
+	float GetCurrentTick() const;
+	float GetNormalizedTime() const;
 	void Play(AnimationClip* InClip, bool bInLoop);
 	XMMATRIX CalculateNodeLocalTransform(const SkeletalNode* InNode);
 	const std::vector<XMFLOAT4X4>& GetFinalBoneMatrices() const { return FinalBoneMatrices; }

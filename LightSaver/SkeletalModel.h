@@ -38,10 +38,7 @@ struct BoneInfo
 class SkeletalModel
 {
 public:
-    bool Initialize(
-        ID3D11Device* Device,
-        const std::string& FilePath,
-        const std::unordered_map<std::string, std::string>& TextureOverrides = {});
+    bool Initialize(ID3D11Device* Device, const std::string& FilePath, const std::unordered_map<std::string, std::string>& TextureOverrides = {});
     const SkeletalNode& GetRootNode() const { return RootNode; }
     size_t GetBoneCount() const{return BoneInfos.size(); }
     bool FindBoneIndex(const std::string& BoneName, UINT& OutBoneIndex);

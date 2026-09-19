@@ -7,10 +7,7 @@
 #include <assimp/config.h>
 #include <filesystem>
 
-bool SkeletalModel::Initialize(
-	ID3D11Device* Device,
-	const std::string& FilePath,
-	const std::unordered_map<std::string, std::string>& TextureOverrides)
+bool SkeletalModel::Initialize(ID3D11Device* Device, const std::string& FilePath, const std::unordered_map<std::string, std::string>& TextureOverrides)
 {
 	BoneInfos.clear();
 	BoneInfoMap.clear();

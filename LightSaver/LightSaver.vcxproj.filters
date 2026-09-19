@@ -25,6 +25,9 @@
     <Filter Include="Gameplay">
       <UniqueIdentifier>{797D4162-819D-448F-903B-E183A9A5634E}</UniqueIdentifier>
     </Filter>
+	<Filter Include="Audio">
+	  <UniqueIdentifier>{8EED94F8-1E0D-4F54-9AE8-AF17DEB44A40}</UniqueIdentifier>
+	</Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
@@ -138,6 +141,9 @@
     <ClCompile Include="SkeletalMeshComponent.cpp">
       <Filter>Rendering\Resources</Filter>
     </ClCompile>
+	<ClCompile Include="SoundManager.cpp">
+	  <Filter>Audio</Filter>
+	</ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -254,6 +260,9 @@
     <ClInclude Include="SkeletalMeshComponent.h">
       <Filter>Rendering\Resources</Filter>
     </ClInclude>
+	<ClInclude Include="SoundManager.h">
+	  <Filter>Audio</Filter>
+	</ClInclude>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="shader.hlsl">

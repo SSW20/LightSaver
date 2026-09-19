@@ -39,6 +39,7 @@ private:
 	PlayerController MainPlayerController;
 	PlayerActor* MainPlayer = nullptr;
 	Model GeneratorModel;
+	Model ExitZoneMarkerModel;
 	SkeletalModel TreeEntModel;
 	AnimationClip TreeEntIdleAnimation;
 	AnimationClip TreeEntWalkAnimation;

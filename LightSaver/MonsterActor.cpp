@@ -3,6 +3,7 @@
 #include "NavigationGrid.h"
 #include <cmath>
 #include "SkeletalMeshComponent.h"
+#include "SoundManager.h"
 
 namespace
 {
@@ -12,6 +13,17 @@ namespace
 	const DirectX::XMFLOAT3 MonsterCollisionHalfSize = { 1.12f, 0.7f, 1.12f };
 	const DirectX::XMFLOAT3 StairBottom = { -12.0f * LevelScale, 0.2f * LevelScale, -8.4f * LevelScale };
 	const DirectX::XMFLOAT3 StairTop = { -12.0f * LevelScale, 5.2f * LevelScale, 6.0f * LevelScale };
+	constexpr float LeftFootContactProgress = 0.05f;
+	constexpr float RightFootContactProgress = 0.575f;
+
+	bool DidAnimationPassProgress(float PreviousProgress, float CurrentProgress, float EventProgress)
+	{
+		if (CurrentProgress >= PreviousProgress)
+		{
+			return PreviousProgress < EventProgress && CurrentProgress >= EventProgress;
+		}
+		return PreviousProgress < EventProgress || CurrentProgress >= EventProgress;
+	}
 
 	float GetDistanceXZ(const DirectX::XMFLOAT3& A, const DirectX::XMFLOAT3& B)
 	{
@@ -36,11 +48,13 @@ void MonsterActor::OnUpdate(float DeltaTime)
 
 	bool bInLight = IsInLight();
 	UpdateState(bInLight, DistanceToTarget);
+	bMovedThisFrame = false;
 
 	switch (CurrentState)
 	{
 	case MonsterState::Chase:
 		UpdateChase(DeltaTime);
+		UpdateWalkFootsteps();
 		AttackUpateTimer -= DeltaTime;
 		break;
 	case MonsterState::Frozen:
@@ -97,6 +111,7 @@ void MonsterActor::ChangeState(MonsterState NewState)
 			{
 				Mesh->Play(WalkAnimation, true);
 				CurrentAnimation = WalkAnimation;
+				PreviousWalkAnimationProgress = 0.0f;
 			}
 			Mesh->SetAnimationPaused(false);
 		}
@@ -104,6 +119,10 @@ void MonsterActor::ChangeState(MonsterState NewState)
 
 	if (CurrentState == MonsterState::Attack)
 	{
+		SoundManager::Get().Play3D(
+			SoundID::MonsterAttack,
+			GetActorTransform().Position,
+			0.92f);
 		if (Mesh != nullptr)
 		{
 			Mesh->SetAnimationPaused(false);
@@ -228,6 +247,7 @@ void MonsterActor::UpdateChase(float DeltaTime)
 	}
 
 	GetActorTransform().Position = CandidatePosition;
+	bMovedThisFrame = true;
 
 	// 회전 설정
 	/*DirectX::XMVECTOR GroundNormal = DirectX::XMLoadFloat3(&GroundHit.Normal);*/
@@ -357,6 +377,36 @@ void MonsterActor::RegisterTarget(Actor* TargetActor)
 	Target = dynamic_cast<PlayerActor*>(TargetActor);
 }
 
+void MonsterActor::UpdateWalkFootsteps()
+{
+	SkeletalMeshComponent* Mesh = FindComponent<SkeletalMeshComponent>();
+	if (Mesh == nullptr || CurrentAnimation != WalkAnimation)
+	{
+		PreviousWalkAnimationProgress = 0.0f;
+		return;
+	}
+
+	const float CurrentProgress = Mesh->GetAnimationProgress();
+	const bool bLeftFootContact = DidAnimationPassProgress(
+		PreviousWalkAnimationProgress,
+		CurrentProgress,
+		LeftFootContactProgress);
+	const bool bRightFootContact = DidAnimationPassProgress(
+		PreviousWalkAnimationProgress,
+		CurrentProgress,
+		RightFootContactProgress);
+
+	if (bMovedThisFrame && (bLeftFootContact || bRightFootContact))
+	{
+		SoundManager::Get().Play3D(
+			SoundID::MonsterFootstep,
+			GetActorTransform().Position,
+			1.0f);
+	}
+
+	PreviousWalkAnimationProgress = CurrentProgress;
+}
+
 void MonsterActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
 {
 	GetActorTransform().Position = SpawnPosition;
@@ -367,6 +417,8 @@ void MonsterActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
 	CurrentPathIndex = 0;
 	PathUpdateTimer = 0.0f;
 	AttackUpateTimer = 0.0f;
+	PreviousWalkAnimationProgress = 0.0f;
+	bMovedThisFrame = false;
 	StairDirection = StairTravelDirection::None;
 
 	SkeletalMeshComponent* Mesh = FindComponent<SkeletalMeshComponent>();
@@ -375,6 +427,7 @@ void MonsterActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
 	{
 		CurrentAnimation = WalkAnimation;
 		Mesh->Play(WalkAnimation, true);
+		PreviousWalkAnimationProgress = 0.0f;
 	}
 }
 
@@ -391,5 +444,6 @@ void MonsterActor::SetAnimations(AnimationClip* InIdle, AnimationClip* InWalk, A
 	{
 		CurrentAnimation = WalkAnimation;
 		Mesh->Play(WalkAnimation, true);
+		PreviousWalkAnimationProgress = 0.0f;
 	}
 }

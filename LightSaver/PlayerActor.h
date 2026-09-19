@@ -15,6 +15,7 @@ public:
 	bool IsAlive() const { return bIsAlive; }
 
 	void TakeDamage(int Damage);
+	void SetMonsterDistance(float Distance) { MonsterDistance = Distance; }
 	float GetDamageAlpha() const { return 1.0f - float(CurrentHealth) / float(MaxHealth); }
 	int GetCurrentHealth() const { return CurrentHealth; }
 	void ToggleFlashlight();
@@ -32,6 +33,11 @@ private:
 
 	float InvincibleDuration = 1.0f;
 	float InvincibleTimer = 0.0f;
+	float BreathTimer = 0.0f;
+	float BreathInterval = 3.6f;
+	float MonsterDistance = 1000000.0f;
+	float ThreatAudioStartDistance = 18.0f;
+	float ThreatAudioFullDistance = 3.0f;
 
 	bool bFlashlightOn = false;
 	float FlashlightDuration = 4.0f;

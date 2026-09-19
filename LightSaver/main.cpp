@@ -25,11 +25,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		return 0;
 	}
 
-	LightSaverGame LightSaver;
 	int exitCode = 0;
-	if (LightSaver.Initialize(hInstance, hPrevInstance, lpCmdLine, nCmdShow))
 	{
-		exitCode = LightSaver.Run();
+		// Direct3D와 XAudio2 자원이 COM보다 먼저 파괴되도록 수명을 제한한다.
+		LightSaverGame LightSaver;
+		if (LightSaver.Initialize(hInstance, hPrevInstance, lpCmdLine, nCmdShow))
+		{
+			exitCode = LightSaver.Run();
+		}
 	}
 
 	CoUninitialize();
