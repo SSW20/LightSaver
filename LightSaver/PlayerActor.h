@@ -16,6 +16,7 @@ public:
 
 	void TakeDamage(int Damage);
 	void SetMonsterDistance(float Distance) { MonsterDistance = Distance; }
+	float GetThreatRatio() const { return ThreatRatio; }
 	float GetDamageAlpha() const { return 1.0f - float(CurrentHealth) / float(MaxHealth); }
 	int GetCurrentHealth() const { return CurrentHealth; }
 	void ToggleFlashlight();
@@ -38,6 +39,7 @@ private:
 	float MonsterDistance = 1000000.0f;
 	float ThreatAudioStartDistance = 18.0f;
 	float ThreatAudioFullDistance = 3.0f;
+	float ThreatRatio = 0.0f;
 
 	bool bFlashlightOn = false;
 	float FlashlightDuration = 4.0f;

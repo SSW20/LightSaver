@@ -151,10 +151,20 @@ void LightSaverGame::Update(float deltaTime)
 	MainPlayerController.Update(deltaTime, GetInput(), GameWorld);
 	GameWorld.Update(deltaTime);
 
+	const bool bHasChaseMusic = SoundManager::Get().HasSound(SoundID::ChaseMusic);
+	const float ThreatRatio = bHasChaseMusic ? MainPlayer->GetThreatRatio() : 0.0f;
+	SoundManager::Get().StartLoop2D(
+		SoundID::BackgroundMusic,
+		0.12f * (1.0f - ThreatRatio));
+	SoundManager::Get().StartLoop2D(
+		SoundID::ChaseMusic,
+		0.25f * ThreatRatio);
+
 	if (MainPlayer != nullptr && !MainPlayer->IsAlive())
 	{
 		CurrentGameState = GameState::PlayerDead;
-		// SoundManager::Get().StopLoop(SoundID::BackgroundMusic);
+		SoundManager::Get().StopLoop(SoundID::BackgroundMusic);
+		SoundManager::Get().StopLoop(SoundID::ChaseMusic);
 		SoundManager::Get().Play2D(SoundID::GameOver, 0.88f);
 		GetInput().SetMouseLocked(false);
 		return;
@@ -165,7 +175,8 @@ void LightSaverGame::Update(float deltaTime)
 	{
 		CurrentGameState = GameState::GameClear;
 		SoundManager::Get().StopLoop(SoundID::PlayerHeartbeat);
-		// SoundManager::Get().StopLoop(SoundID::BackgroundMusic);
+		SoundManager::Get().StopLoop(SoundID::BackgroundMusic);
+		SoundManager::Get().StopLoop(SoundID::ChaseMusic);
 		SoundManager::Get().Play2D(SoundID::GameWin, 0.88f);
 		GetInput().SetMouseLocked(false);
 	}
@@ -189,7 +200,8 @@ void LightSaverGame::StartGame()
 	}
 
 	MainPlayerController.Reset();
-	// SoundManager::Get().StartLoop2D(SoundID::BackgroundMusic, 0.12f);
+	SoundManager::Get().StartLoop2D(SoundID::BackgroundMusic, 0.12f);
+	SoundManager::Get().StartLoop2D(SoundID::ChaseMusic, 0.0f);
 	CurrentGameState = GameState::Playing;
 	GetInput().SetMouseLocked(true);
 }

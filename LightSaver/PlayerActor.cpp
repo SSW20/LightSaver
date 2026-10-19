@@ -36,6 +36,7 @@ void PlayerActor::Reset(const DirectX::XMFLOAT3& SpawnPosition)
 	InvincibleTimer = 0.0f;
 	BreathTimer = 0.0f;
 	MonsterDistance = 1000000.0f;
+	ThreatRatio = 0.0f;
 	SoundManager::Get().StopLoop(SoundID::PlayerHeartbeat);
 	bFlashlightOn = false;
 	FlashlightRemainingTime = 0.0f;
@@ -70,7 +71,7 @@ void PlayerActor::OnUpdate(float DeltaTime)
 {
 	// 몬스터가 월드 거리 18 밖이면 0, 3 안이면 1이 되는 위험도다.
 	const float DistanceRange = ThreatAudioStartDistance - ThreatAudioFullDistance;
-	const float ThreatRatio = DistanceRange > 0.0f
+	ThreatRatio = DistanceRange > 0.0f
 		? std::clamp(
 			(ThreatAudioStartDistance - MonsterDistance) / DistanceRange,
 			0.0f,

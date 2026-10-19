@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <exception>
+#include <filesystem>
 #include <utility>
 
 SoundManager& SoundManager::Get()
@@ -36,7 +37,12 @@ bool SoundManager::Initialize()
 		Sounds.emplace(SoundID::GameOver, std::make_unique<DirectX::SoundEffect>(Engine.get(), L"Assets/Audio/GameOver.wav"));
 		Sounds.emplace(SoundID::GameWin, std::make_unique<DirectX::SoundEffect>(Engine.get(), L"Assets/Audio/GameWin.wav"));
 		Sounds.emplace(SoundID::UIClick, std::make_unique<DirectX::SoundEffect>(Engine.get(), L"Assets/Audio/UIClick.wav"));
-		// Sounds.emplace(SoundID::BackgroundMusic, std::make_unique<DirectX::SoundEffect>(Engine.get(), L"Assets/Audio/BackgroundMusic.wav"));
+		Sounds.emplace(SoundID::BackgroundMusic, std::make_unique<DirectX::SoundEffect>(Engine.get(), L"Assets/Audio/BackgroundMusic.wav"));
+		const wchar_t* ChaseMusicPath = L"Assets/Audio/ChaseMusic.wav";
+		if (std::filesystem::exists(ChaseMusicPath))
+		{
+			Sounds.emplace(SoundID::ChaseMusic, std::make_unique<DirectX::SoundEffect>(Engine.get(), ChaseMusicPath));
+		}
 	}
 	catch (const std::exception&)
 	{
@@ -84,6 +90,11 @@ bool SoundManager::Update()
 		ActiveSpatialSounds.end());
 
 	return bUpdated;
+}
+
+bool SoundManager::HasSound(SoundID ID) const
+{
+	return FindSound(ID) != nullptr;
 }
 
 void SoundManager::Play2D(SoundID ID, float Volume)

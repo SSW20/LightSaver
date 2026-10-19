@@ -27,7 +27,8 @@ enum class SoundID
 	GameOver,
 	GameWin,
 	UIClick,
-	BackgroundMusic
+	BackgroundMusic,
+	ChaseMusic
 };
 
 class SoundManager
@@ -37,6 +38,7 @@ public:
 
 	bool Initialize();
 	bool Update();
+	bool HasSound(SoundID ID) const;
 	void Shutdown();
 	void Play2D(SoundID ID, float Volume = 1.0f);
 	void PlayRandom2D(SoundID ID, float Volume = 1.0f);
